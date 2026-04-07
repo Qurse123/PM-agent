@@ -1,0 +1,32 @@
+version: "3.9" ## use compose 3.9 
+services: 
+  postgres: 
+    image: pgvector/pgvector:pg16 ## pgvector is used for vector search/embeddings
+    environment:
+      POSTGRES_DB: pm_agent 
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data ## this is where we will store the docker image so if we need to delete or restart the container it will spin it up from here
+
+  redis:
+    image: redis:7-alpine ## creates a redis container that uses this version 
+    ports:
+      - "6379:6379" ## lives on these ports 
+
+  backend:
+    build: ./backend ## docker will look instead ./backend for a docker file and build an image off that
+    ports:
+      - "8000:8000" ## lives on this port
+    depends_on: ## means that postgress and redis containers have to be running before the backend container works
+      - postgres 
+      - redis
+    env_file: 
+      - ./backend/.env 
+    volumes:
+      - ./backend:/app ## This is a mount the local backend folder onto the app folder so that if we make any code changes the container picks it up
+ 
+volumes: ## This is dockers persistent database storage from postgress, saved and managed by docker. This is where info on your DB lives even if you delete your DB
+  pgdata:
