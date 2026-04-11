@@ -117,3 +117,90 @@ async def create_run_from_meet(
         created_at=run.created_at,
         segment_count=len(segments),
     )
+
+@router.post("", response_model=RunResponse, status_code=201)
+async def create_run_from_paste(
+    request: PasteRunRequest,
+    db: AsyncSession = Depends(get_db),
+) -> RunResponse:
+    """Ingest a pasted transcript."""
+    run = Run(
+        conference_record_id=request.conference_record_id,
+        status="ingesting",
+    )
+    db.add(run)
+    await db.flush()  # populate run.id
+
+    # Back-fill auto-generated conference_record_id if not provided
+    if not request.conference_record_id:
+        run.conference_record_id = f"paste-{run.id}"
+
+    try:
+        segments = parse_transcript(request.transcript_text, run.id)
+
+        db.add_all(
+            [
+                TranscriptSegment(
+                    id=uuid.uuid4(),
+                    run_id=run.id,
+                    **seg,
+                )
+                for seg in segments
+            ]
+        )
+        run.status = "ready"
+        await db.commit()
+    except Exception as exc:
+        run.status = "failed"
+        await db.commit()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return RunResponse(
+        id=run.id,
+        conference_record_id=run.conference_record_id,
+        status=run.status,
+        created_at=run.created_at,
+        segment_count=len(segments),
+    )
+
+
+@router.get("/{run_id}", response_model=RunResponse)
+async def get_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> RunResponse:
+    """Fetch a single run by ID."""
+    result = await db.execute(select(Run).where(Run.id == run_id))
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    segment_count = await _count_segments(db, run_id)
+
+    return RunResponse(
+        id=run.id,
+        conference_record_id=run.conference_record_id,
+        status=run.status,
+        created_at=run.created_at,
+        segment_count=segment_count,
+    )
+
+
+@router.get("/{run_id}/segments", response_model=list[SegmentResponse])
+async def get_run_segments(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> list[SegmentResponse]:
+    """Return all transcript segments for a run, ordered by segment_id."""
+    result = await db.execute(select(Run).where(Run.id == run_id))
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    seg_result = await db.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.run_id == run_id)
+        .order_by(TranscriptSegment.start_ms.asc().nulls_last(), TranscriptSegment.id.asc())
+    )
+    segments = seg_result.scalars().all()
+    return [SegmentResponse.model_validate(s) for s in segments]
