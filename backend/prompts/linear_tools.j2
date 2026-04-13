@@ -1,0 +1,64 @@
+[
+  {
+    "name": "search_linear_issues",
+    "description": "Search Linear issues by keyword. Returns a list of matching issues with id, identifier, title, state, assignee, and description.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string", "description": "Keyword search string"},
+        "first": {"type": "integer", "description": "Max results to return", "default": 20},
+        "after": {"type": "string", "description": "Cursor for pagination (optional)"}
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "get_linear_issue",
+    "description": "Fetch full details of a single Linear issue by its ID.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "issue_id": {"type": "string", "description": "The Linear issue ID"}
+      },
+      "required": ["issue_id"]
+    }
+  },
+  {
+    "name": "create_proposal",
+    "description": "Create a proposal to update or create a Linear issue. REQUIRED: Every proposal must include at least one citation referencing segment_ids from the transcript provided. Do not fabricate segment_ids.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "target": {"type": "string", "enum": ["linear"], "description": "Integration target"},
+        "operation": {"type": "string", "enum": ["create", "update"], "description": "Operation type"},
+        "before": {
+          "type": ["object", "null"],
+          "description": "Current issue state (required for update, null for create)"
+        },
+        "after": {
+          "type": "object",
+          "description": "Proposed new issue state or fields to create"
+        },
+        "citations": {
+          "type": "array",
+          "description": "Evidence from the transcript. Must have at least one entry.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "segment_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of segment_ids from the transcript"
+              },
+              "quote": {"type": "string", "description": "Exact text from the transcript"},
+              "rationale": {"type": "string", "description": "Why this citation justifies the proposal"}
+            },
+            "required": ["segment_ids", "quote", "rationale"]
+          }
+        }
+      },
+      "required": ["target", "operation", "after", "citations"]
+    }
+  }
+]
