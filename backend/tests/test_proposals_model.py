@@ -19,7 +19,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
-    MetaData,
+    MetaData, 
     String,
     Table,
     Text,
