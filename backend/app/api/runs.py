@@ -102,7 +102,7 @@ async def create_run_from_meet(
             TranscriptSegment(
                 id=uuid.uuid4(),
                 run_id=run.id,
-                **seg,
+                **seg, ## unpacks a dictionary into key and value *seg would work with lists
             )
             for seg in segments
         ]

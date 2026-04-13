@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-MEET_BASE = "https://meet.googleapis.com/v2" ## THIS IS WRONG will work on this
+MEET_BASE = "https://meet.googleapis.com/v2"
 
 
 def _parse_time_to_ms(value: str | None) -> int | None:
@@ -43,7 +43,9 @@ async def fetch_transcript_entries(
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         ##list transcripts for the conference record (with pagination)
-        transcripts_url = f"{MEET_BASE}/{conference_record_id}/transcripts"  #
+        transcripts_url = (
+            f"{MEET_BASE}/conferenceRecords/{conference_record_id}/transcripts"
+        )
         transcripts: list[dict[str, Any]] = []
         page_token: str | None = None
         while True: ## run loop forever until something in the loop breaks
@@ -76,8 +78,10 @@ async def fetch_transcript_entries(
                     break
 
             for entry in entries:
-                # Derive segment_id from the last component of the resource name
-                segment_id = entry["name"].split("/")[-1] ## name is a url, split the url 1/2/3/4 --> 1,2,3,4 --> 4 
+                # Derive segment_id from the last component of the resource name,
+                # falling back to a stable positional id if the field is missing.
+                raw_name: str | None = entry.get("name")
+                segment_id = raw_name.split("/")[-1] if raw_name else f"meet-{global_index:04d}"
 
                 # Parse timestamps
                 start_ms = _parse_time_to_ms(entry.get("startTime"))
