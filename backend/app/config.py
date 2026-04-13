@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/auth/callback"
+    linear_api_key: str = ""
+    anthropic_api_key: str = ""
 
 
 settings = Settings()  # pyright: ignore[reportCallIssue]
