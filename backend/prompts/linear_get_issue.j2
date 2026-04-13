@@ -1,0 +1,20 @@
+query GetIssue($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    description
+    state { name }
+    assignee { displayName }
+    team { name }
+    createdAt
+    updatedAt
+    comments {
+      nodes {
+        body
+        user { displayName }
+        createdAt
+      }
+    }
+  }
+}

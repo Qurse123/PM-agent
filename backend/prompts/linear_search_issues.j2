@@ -1,0 +1,15 @@
+query SearchIssues($filter: IssueFilter, $first: Int, $after: String) {
+  issues(filter: $filter, first: $first, after: $after) {
+    nodes {
+      id
+      identifier
+      title
+      state { name }
+      assignee { displayName }
+      description
+      createdAt
+      updatedAt
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
