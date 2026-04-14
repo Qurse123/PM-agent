@@ -120,16 +120,19 @@ async def _make_sqlite_engine():
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_db(segments: list) -> AsyncMock:
-    """Build a mock AsyncSession that returns the given segments on execute()."""
+def _make_mock_db(segments: list, workspace=None) -> AsyncMock:
+    """Build a mock AsyncSession that returns segments then workspace on execute()."""
     mock_scalars = MagicMock()
     mock_scalars.all.return_value = segments
 
-    mock_result = MagicMock()
-    mock_result.scalars.return_value = mock_scalars
+    segments_result = MagicMock()
+    segments_result.scalars.return_value = mock_scalars
+
+    workspace_result = MagicMock()
+    workspace_result.scalar_one_or_none.return_value = workspace
 
     db = AsyncMock(spec=AsyncSession)
-    db.execute = AsyncMock(return_value=mock_result)
+    db.execute = AsyncMock(side_effect=[segments_result, workspace_result])
     db.add = MagicMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
@@ -455,3 +458,74 @@ async def test_end_turn_exits_loop():
 
     assert mock_messages.create.call_count == 1
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# 7. Workspace context is rendered into the system prompt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workspace_context_rendered_in_system_prompt():
+    """When workspace context is set, system prompt includes team and project info."""
+    run_id = uuid.uuid4()
+    valid_seg_id = f"paste-{run_id}-0000"
+    segment = _make_segment(valid_seg_id, run_id)
+
+    workspace = MagicMock()
+    workspace.context = "Backend Platform team. Focus on infrastructure tickets only. Restrict to team-abc."
+
+    mock_db = _make_mock_db(segments=[segment], workspace=workspace)
+
+    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
+    mock_messages = AsyncMock()
+    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_client = MagicMock()
+    mock_client.messages = mock_messages
+    mock_linear = AsyncMock()
+
+    with (
+        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+    ):
+        await run_orchestrator(run_id, mock_db)
+
+    # Inspect the system prompt passed to Claude
+    call_kwargs = mock_messages.create.call_args.kwargs
+    system_prompt = call_kwargs["system"]
+    assert "Backend Platform team" in system_prompt
+    assert "team-abc" in system_prompt
+    assert "infrastructure tickets" in system_prompt
+
+
+# ---------------------------------------------------------------------------
+# 8. No workspace context — orchestrator still works (graceful None)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_workspace_context_graceful():
+    """When no workspace context row exists, orchestrator works without error."""
+    run_id = uuid.uuid4()
+    valid_seg_id = f"paste-{run_id}-0000"
+    segment = _make_segment(valid_seg_id, run_id)
+    mock_db = _make_mock_db(segments=[segment], workspace=None)
+
+    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
+    mock_messages = AsyncMock()
+    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_client = MagicMock()
+    mock_client.messages = mock_messages
+    mock_linear = AsyncMock()
+
+    with (
+        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+    ):
+        result = await run_orchestrator(run_id, mock_db)
+
+    assert result == []
+    call_kwargs = mock_messages.create.call_args.kwargs
+    system_prompt = call_kwargs["system"]
+    # No workspace block should appear
+    assert "WORKSPACE CONTEXT" not in system_prompt

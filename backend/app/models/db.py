@@ -96,3 +96,13 @@ class ProposalCitation(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
 
     proposal: Mapped["Proposal"] = relationship("Proposal", back_populates="citations")
+
+
+class WorkspaceContext(Base):
+    __tablename__ = "workspace_context"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
