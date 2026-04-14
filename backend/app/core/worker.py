@@ -29,5 +29,5 @@ async def orchestrate_run(ctx: dict, run_id_str: str) -> None:
 
 
 class WorkerSettings:
-    functions = [orchestrate_run] ## this is where the jobs are queued
+    functions = [orchestrate_run]
     redis_settings = RedisSettings.from_dsn(settings.redis_url) ## connect the worker to the redis through redis URL
