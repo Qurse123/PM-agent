@@ -20,6 +20,11 @@ Please analyze this meeting transcript and propose any relevant Linear issue upd
 Prior feedback context:
 {{ prior_feedback }}
 {%- endif %}
+{%- if workspace and workspace.context %}
+
+WORKSPACE CONTEXT:
+{{ workspace.context }}
+{%- endif %}
 
 # PHASE C STUB: retrieve similar feedback_events via pgvector
 # prior_feedback is empty in Phase B — will be populated in Phase C

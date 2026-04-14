@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.integrations.linear import LinearClient
-from app.models.db import Proposal, ProposalCitation, TranscriptSegment
+from app.models.db import Proposal, ProposalCitation, TranscriptSegment, WorkspaceContext
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
 _jinja_env = Environment(loader=FileSystemLoader(_PROMPTS_DIR), keep_trailing_newline=True)
@@ -23,11 +23,17 @@ MAX_ITERATIONS = 10
 _TOOLS: list[ToolParam] = json.loads(_jinja_env.get_template("linear_tools.j2").render())
 
 
-def _build_system_prompt(transcript_lines: list[str], valid_segment_ids: set[str], prior_feedback: str) -> str:
+def _build_system_prompt(
+    transcript_lines: list[str],
+    valid_segment_ids: set[str],
+    prior_feedback: str,
+    workspace: WorkspaceContext | None = None,
+) -> str:
     return _jinja_env.get_template("orchestrator_system.j2").render(
         transcript_text="\n".join(transcript_lines),
         segment_ids_list=", ".join(sorted(valid_segment_ids)),
         prior_feedback=prior_feedback,
+        workspace=workspace,
     )
 
 
@@ -137,7 +143,10 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
     # PHASE C STUB: retrieve similar feedback_events via pgvector
     prior_feedback: str = ""  # Phase B: no feedback RAG
 
-    system_prompt = _build_system_prompt(transcript_lines, valid_segment_ids, prior_feedback)
+    ctx_result = await db.execute(select(WorkspaceContext).limit(1))
+    workspace = ctx_result.scalar_one_or_none()
+
+    system_prompt = _build_system_prompt(transcript_lines, valid_segment_ids, prior_feedback, workspace)
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     linear = LinearClient(settings.linear_api_key)
