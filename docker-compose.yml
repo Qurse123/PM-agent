@@ -21,12 +21,31 @@ services:
     ports:
       - "8000:8000" ## lives on this port
     depends_on: ## means that postgress and redis containers have to be running before the backend container works
-      - postgres 
+      - postgres
       - redis
-    env_file: 
-      - ./backend/.env 
+    env_file:
+      - ./backend/.env
+    environment:
+      ## Override connection URLs to use Docker service names (not localhost)
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/pm_agent
+      REDIS_URL: redis://redis:6379
     volumes:
       - ./backend:/app ## This is a mount the local backend folder onto the app folder so that if we make any code changes the container picks it up
- 
+
+  worker:
+    build: ./backend
+    command: python run_worker.py
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - ./backend/.env
+    environment:
+      ## Override connection URLs to use Docker service names (not localhost)
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/pm_agent
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./backend:/app
+
 volumes: ## This is dockers persistent database storage from postgress, saved and managed by docker. This is where info on your DB lives even if you delete your DB
   pgdata:
