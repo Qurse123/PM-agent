@@ -37,7 +37,7 @@
         },
         "after": {
           "type": "object",
-          "description": "Proposed new issue state or fields to create"
+          "description": "Proposed new issue state or fields to create. For 'create' operations, must include 'title' (string), 'description' (string), and 'teamId' (string, the Linear team ID). For 'update' operations, include only the fields being changed."
         },
         "citations": {
           "type": "array",
