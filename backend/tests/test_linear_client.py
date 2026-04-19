@@ -202,3 +202,56 @@ async def test_null_assignee_handled():
         result = await client.search_issues("no assignee")
 
     assert result["issues"][0]["assignee"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_issue_sends_correct_variables():
+    """create_issue posts the correct mutation variables to Linear."""
+    mock_resp = _mock_response(
+        {"data": {"issueCreate": {"success": True, "issue": {"id": "new-1", "title": "New issue", "url": "https://linear.app/new-1"}}}}
+    )
+    mock_client, mock_ctx = _patch_client(mock_resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_ctx):
+        client = LinearClient(api_key="test-key")
+        result = await client.create_issue(title="New issue", description="Details", team_id="team-xyz")
+
+    assert result["id"] == "new-1"
+    call_kwargs = mock_client.post.call_args
+    body = call_kwargs[1]["json"]
+    assert body["variables"]["title"] == "New issue"
+    assert body["variables"]["description"] == "Details"
+    assert body["variables"]["teamId"] == "team-xyz"
+
+
+@pytest.mark.asyncio
+async def test_update_issue_sends_correct_variables():
+    """update_issue posts the correct mutation variables to Linear."""
+    mock_resp = _mock_response(
+        {"data": {"issueUpdate": {"success": True, "issue": {"id": "li-123", "title": "Updated", "url": "https://linear.app/li-123"}}}}
+    )
+    mock_client, mock_ctx = _patch_client(mock_resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_ctx):
+        client = LinearClient(api_key="test-key")
+        result = await client.update_issue("li-123", {"title": "Updated"})
+
+    assert result["id"] == "li-123"
+    call_kwargs = mock_client.post.call_args
+    body = call_kwargs[1]["json"]
+    assert body["variables"]["id"] == "li-123"
+    assert body["variables"]["input"] == {"title": "Updated"}
+
+
+@pytest.mark.asyncio
+async def test_create_issue_failure_raises():
+    """create_issue raises RuntimeError when Linear returns success=False."""
+    mock_resp = _mock_response(
+        {"data": {"issueCreate": {"success": False, "issue": None}}}
+    )
+    mock_client, mock_ctx = _patch_client(mock_resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_ctx):
+        client = LinearClient(api_key="test-key")
+        with pytest.raises(RuntimeError, match="Linear issueCreate failed"):
+            await client.create_issue(title="Bad", description="", team_id="team-xyz")

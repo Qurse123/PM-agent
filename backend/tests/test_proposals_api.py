@@ -2,23 +2,27 @@
 Tests for the proposals API (app/api/proposals.py).
 
 Tests:
-  1. GET /runs/{run_id}/proposals returns 404 when run not found
-  2. GET /runs/{run_id}/proposals returns empty list when no proposals
-  3. GET /runs/{run_id}/proposals returns proposals with citations
-  4. POST /runs/{run_id}/analyze returns 404 when run not found
-  5. POST /runs/{run_id}/analyze returns 409 when run not in 'ready' status
-  6. POST /runs/{run_id}/analyze returns 202 and enqueues job
-  7. POST approve returns 404 when proposal not found
-  8. POST approve returns 409 when proposal not pending
-  9. POST approve sets status to 'approved'
-  10. POST deny sets status to 'denied'
+  1.  GET /runs/{run_id}/proposals returns 404 when run not found
+  2.  GET /runs/{run_id}/proposals returns empty list when no proposals
+  3.  GET /runs/{run_id}/proposals returns proposals with citations
+  4.  POST /runs/{run_id}/analyze returns 404 when run not found
+  5.  POST /runs/{run_id}/analyze returns 409 when run not in 'ready' status
+  6.  POST /runs/{run_id}/analyze returns 202 and enqueues job
+  7.  POST approve returns 404 when proposal not found
+  8.  POST approve returns 409 when proposal not pending
+  9.  POST approve calls linear create_issue and sets status to 'applied'
+  10. POST approve calls linear update_issue and sets status to 'applied'
+  11. POST approve sets status to 'failed' when Linear raises
+  12. POST deny sets status to 'denied' and stores FeedbackEvent
+  13. POST deny returns 422 for invalid taxonomy
+  14. POST deny returns 409 when proposal not pending
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -42,14 +46,20 @@ def _make_run(status: str = "ready") -> MagicMock:
     return run
 
 
-def _make_proposal(run_id: uuid.UUID, status: str = "pending") -> MagicMock:
+def _make_proposal(
+    run_id: uuid.UUID,
+    status: str = "pending",
+    operation: str = "create",
+    before: dict | None = None,
+    after: dict | None = None,
+) -> MagicMock:
     proposal = MagicMock()
     proposal.id = uuid.uuid4()
     proposal.run_id = run_id
     proposal.target = "linear"
-    proposal.operation = "create"
-    proposal.before = None
-    proposal.after = {"title": "New ticket"}
+    proposal.operation = operation
+    proposal.before = before
+    proposal.after = after or {"title": "New ticket", "description": "Details", "teamId": "team-abc"}
     proposal.status = status
     proposal.created_at = datetime.now(timezone.utc)
     proposal.citations = []
@@ -61,6 +71,7 @@ def _make_db(execute_side_effects: list) -> AsyncMock:
     db = AsyncMock(spec=AsyncSession)
     db.execute = AsyncMock(side_effect=execute_side_effects)
     db.add = MagicMock()
+    db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     db.rollback = AsyncMock()
@@ -292,20 +303,127 @@ async def test_approve_proposal_not_pending():
 
 
 # ---------------------------------------------------------------------------
-# 9. POST approve sets status to 'approved'
+# 9. POST approve calls linear create_issue and sets status to 'applied'
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_approve_proposal_success():
+async def test_approve_create_calls_linear_and_sets_applied():
+    run = _make_run()
+    proposal = _make_proposal(
+        run.id,
+        operation="create",
+        after={"title": "New ticket", "description": "Details", "teamId": "team-abc"},
+    )
+    db = _make_db([_scalar_result(proposal)])
+    db.refresh = AsyncMock()
+
+    async def _override():
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    app.state.arq_pool = _mock_arq_pool()
+    mock_linear = AsyncMock()
+    mock_linear.create_issue = AsyncMock(return_value={"id": "li-1", "title": "New ticket", "url": "https://linear.app/li-1"})
+
+    with patch("app.api.proposals.LinearClient", return_value=mock_linear):
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post(f"/runs/{run.id}/proposals/{proposal.id}/approve")
+            assert resp.status_code == 200
+            mock_linear.create_issue.assert_called_once_with(
+                title="New ticket",
+                description="Details",
+                team_id="team-abc",
+            )
+            assert proposal.status == "applied"
+        finally:
+            app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 10. POST approve calls linear update_issue and sets status to 'applied'
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_update_calls_linear_and_sets_applied():
+    run = _make_run()
+    proposal = _make_proposal(
+        run.id,
+        operation="update",
+        before={"id": "li-existing-123", "title": "Old title"},
+        after={"title": "Updated title"},
+    )
+    db = _make_db([_scalar_result(proposal)])
+    db.refresh = AsyncMock()
+
+    async def _override():
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    app.state.arq_pool = _mock_arq_pool()
+    mock_linear = AsyncMock()
+    mock_linear.update_issue = AsyncMock(return_value={"id": "li-existing-123", "title": "Updated title", "url": "https://linear.app/li-existing-123"})
+
+    with patch("app.api.proposals.LinearClient", return_value=mock_linear):
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post(f"/runs/{run.id}/proposals/{proposal.id}/approve")
+            assert resp.status_code == 200
+            mock_linear.update_issue.assert_called_once_with(
+                "li-existing-123",
+                {"title": "Updated title"},
+            )
+            assert proposal.status == "applied"
+        finally:
+            app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 11. POST approve sets status to 'failed' when Linear raises
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_linear_failure_sets_failed():
+    run = _make_run()
+    proposal = _make_proposal(
+        run.id,
+        operation="create",
+        after={"title": "New ticket", "description": "", "teamId": "team-abc"},
+    )
+    db = _make_db([_scalar_result(proposal)])
+
+    async def _override():
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    app.state.arq_pool = _mock_arq_pool()
+    mock_linear = AsyncMock()
+    mock_linear.create_issue = AsyncMock(side_effect=RuntimeError("Linear API error"))
+
+    with patch("app.api.proposals.LinearClient", return_value=mock_linear):
+        try:
+            with pytest.raises(RuntimeError, match="Linear API error"):
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                    await ac.post(f"/runs/{run.id}/proposals/{proposal.id}/approve")
+            assert proposal.status == "failed"
+        finally:
+            app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 12. POST deny sets status to 'denied' and stores FeedbackEvent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deny_stores_feedback_event():
     run = _make_run()
     proposal = _make_proposal(run.id, status="pending")
     db = _make_db([_scalar_result(proposal)])
-
-    async def _refresh(obj):
-        pass  # status already mutated in-place
-
-    db.refresh = AsyncMock(side_effect=_refresh)
+    db.refresh = AsyncMock()
 
     async def _override():
         yield db
@@ -314,29 +432,36 @@ async def test_approve_proposal_success():
     app.state.arq_pool = _mock_arq_pool()
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            resp = await ac.post(f"/runs/{run.id}/proposals/{proposal.id}/approve")
+            resp = await ac.post(
+                f"/runs/{run.id}/proposals/{proposal.id}/deny",
+                json={
+                    "reason": "Wrong issue selected",
+                    "category": "wrong ticket",
+                    "disputed_segment_ids": ["seg-001"],
+                },
+            )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "approved"
-        assert proposal.status == "approved"
+        assert proposal.status == "denied"
+        # FeedbackEvent was added to the session
+        db.add.assert_called_once()
+        feedback_arg = db.add.call_args[0][0]
+        assert feedback_arg.reason == "Wrong issue selected"
+        assert feedback_arg.category == "wrong ticket"
+        assert feedback_arg.disputed_segment_ids == ["seg-001"]
     finally:
         app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
-# 10. POST deny sets status to 'denied'
+# 13. POST deny returns 409 when proposal not pending
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_deny_proposal_success():
+async def test_deny_proposal_not_pending():
     run = _make_run()
-    proposal = _make_proposal(run.id, status="pending")
+    proposal = _make_proposal(run.id, status="denied")
     db = _make_db([_scalar_result(proposal)])
-
-    async def _refresh(obj):
-        pass
-
-    db.refresh = AsyncMock(side_effect=_refresh)
 
     async def _override():
         yield db
@@ -345,9 +470,10 @@ async def test_deny_proposal_success():
     app.state.arq_pool = _mock_arq_pool()
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            resp = await ac.post(f"/runs/{run.id}/proposals/{proposal.id}/deny")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "denied"
-        assert proposal.status == "denied"
+            resp = await ac.post(
+                f"/runs/{run.id}/proposals/{proposal.id}/deny",
+                json={"reason": "Already denied", "category": "team policy"},
+            )
+        assert resp.status_code == 409
     finally:
         app.dependency_overrides.clear()

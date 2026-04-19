@@ -120,19 +120,24 @@ async def _make_sqlite_engine():
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_db(segments: list, workspace=None) -> AsyncMock:
-    """Build a mock AsyncSession that returns segments then workspace on execute()."""
+def _make_mock_db(segments: list, workspace=None, feedback_events: list | None = None) -> AsyncMock:
+    """Build a mock AsyncSession that returns segments, feedback events, then workspace on execute()."""
     mock_scalars = MagicMock()
     mock_scalars.all.return_value = segments
 
     segments_result = MagicMock()
     segments_result.scalars.return_value = mock_scalars
 
+    feedback_scalars = MagicMock()
+    feedback_scalars.all.return_value = feedback_events or []
+    feedback_result = MagicMock()
+    feedback_result.scalars.return_value = feedback_scalars
+
     workspace_result = MagicMock()
     workspace_result.scalar_one_or_none.return_value = workspace
 
     db = AsyncMock(spec=AsyncSession)
-    db.execute = AsyncMock(side_effect=[segments_result, workspace_result])
+    db.execute = AsyncMock(side_effect=[segments_result, feedback_result, workspace_result])
     db.add = MagicMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
@@ -529,3 +534,42 @@ async def test_no_workspace_context_graceful():
     system_prompt = call_kwargs["system"]
     # No workspace block should appear
     assert "WORKSPACE CONTEXT" not in system_prompt
+
+
+# ---------------------------------------------------------------------------
+# 9. Prior feedback events are injected into the system prompt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prior_feedback_injected_in_system_prompt():
+    """When FeedbackEvents exist, system prompt includes their taxonomy and reason."""
+    run_id = uuid.uuid4()
+    valid_seg_id = f"paste-{run_id}-0000"
+    segment = _make_segment(valid_seg_id, run_id)
+
+    feedback = MagicMock()
+    feedback.category = "wrong ticket"
+    feedback.reason = "This was about PROJ-999, not the auth ticket"
+    feedback.disputed_segment_ids = ["seg-002"]
+
+    mock_db = _make_mock_db(segments=[segment], feedback_events=[feedback])
+
+    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
+    mock_messages = AsyncMock()
+    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_client = MagicMock()
+    mock_client.messages = mock_messages
+    mock_linear = AsyncMock()
+
+    with (
+        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+    ):
+        await run_orchestrator(run_id, mock_db)
+
+    call_kwargs = mock_messages.create.call_args.kwargs
+    system_prompt = call_kwargs["system"]
+    assert "wrong ticket" in system_prompt
+    assert "PROJ-999" in system_prompt
+    assert "seg-002" in system_prompt
