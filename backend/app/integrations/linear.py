@@ -43,6 +43,36 @@ class LinearClient:
         data = await self._execute(gql, {"id": issue_id})
         return data["issue"]
 
+    async def create_issue(self, title: str, description: str, team_id: str) -> dict:
+        """Create a new Linear issue. Returns the created issue dict."""
+        mutation = """
+        mutation CreateIssue($title: String!, $description: String, $teamId: String!) {
+            issueCreate(input: { title: $title, description: $description, teamId: $teamId }) {
+                success
+                issue { id title url }
+            }
+        }
+        """
+        result = await self._execute(mutation, {"title": title, "description": description, "teamId": team_id})
+        if not result.get("issueCreate", {}).get("success"):
+            raise RuntimeError(f"Linear issueCreate failed: {result}")
+        return result["issueCreate"]["issue"]
+
+    async def update_issue(self, issue_id: str, fields: dict) -> dict:
+        """Update an existing Linear issue. `fields` is a partial IssueUpdateInput dict."""
+        mutation = """
+        mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) {
+                success
+                issue { id title url }
+            }
+        }
+        """
+        result = await self._execute(mutation, {"id": issue_id, "input": fields})
+        if not result.get("issueUpdate", {}).get("success"):
+            raise RuntimeError(f"Linear issueUpdate failed: {result}")
+        return result["issueUpdate"]["issue"]
+
     async def _execute(self, query: str, variables: dict) -> dict:
         headers = {
             "Authorization": self._api_key,  # Linear: no "Bearer" prefix
