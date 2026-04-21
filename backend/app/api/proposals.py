@@ -9,10 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.db import Proposal, ProposalCitation, Run, get_db
+from app.config import settings
+from app.integrations.linear import LinearClient
+from app.models.db import FeedbackEvent, Proposal, ProposalCitation, Run, get_db
 
 router = APIRouter(prefix="/runs", tags=["proposals"])
-
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -42,6 +43,12 @@ class ProposalResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DenyRequest(BaseModel):
+    reason: str
+    category: str  # free-form: e.g. "wrong ticket", "misread transcript", "team policy"
+    disputed_segment_ids: list[str] = []
+
+
 # ---------------------------------------------------------------------------
 # GET /runs/{run_id}/proposals
 # ---------------------------------------------------------------------------
@@ -52,7 +59,7 @@ async def list_proposals(
     run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> list[ProposalResponse]:
-    result = await db.execute(select(Run).where(Run.id == run_id)) ##worker looking this up to confirm that a run exists
+    result = await db.execute(select(Run).where(Run.id == run_id))
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -63,7 +70,7 @@ async def list_proposals(
         .order_by(Proposal.created_at.asc())
     )
     proposals = proposals_result.scalars().all()
-    return [ProposalResponse.model_validate(p) for p in proposals] ## making sure each row follows the correct pydantic schema 
+    return [ProposalResponse.model_validate(p) for p in proposals]
 
 
 # ---------------------------------------------------------------------------
@@ -90,11 +97,10 @@ async def analyze_run(
     run.status = "analyzing"
     await db.commit()
 
-    # PHASE C: inject feedback_events context
     arq_pool = request.app.state.arq_pool
-    await arq_pool.enqueue_job("orchestrate_run", str(run_id)) ## Pushes a background task into redis queue called orchestrate_run with its run_id 
+    await arq_pool.enqueue_job("orchestrate_run", str(run_id))
 
-    return {"status": "queued", "run_id": str(run_id)} ## returns the status of the task with its run_id
+    return {"status": "queued", "run_id": str(run_id)}
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +116,8 @@ async def approve_proposal(
 ) -> ProposalResponse:
     result = await db.execute(
         select(Proposal)
-        .where(Proposal.id == proposal_id, Proposal.run_id == run_id) 
-        .options(selectinload(Proposal.citations)) ## get the citations aswell that match the run id and proposal_id
+        .where(Proposal.id == proposal_id, Proposal.run_id == run_id)
+        .options(selectinload(Proposal.citations))
     )
     proposal = result.scalar_one_or_none()
     if proposal is None:
@@ -123,6 +129,30 @@ async def approve_proposal(
         )
 
     proposal.status = "approved"
+    await db.flush()
+
+    linear = LinearClient(settings.linear_api_key)
+    try:
+        if proposal.operation == "create":
+            after = proposal.after
+            await linear.create_issue(
+                title=after["title"],
+                description=after.get("description", ""),
+                team_id=after["teamId"],
+            )
+        elif proposal.operation == "update":
+            if proposal.before is None or "id" not in proposal.before:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Update proposals must include before.id",
+                )
+            issue_id = proposal.before["id"]
+            await linear.update_issue(issue_id, proposal.after)
+        proposal.status = "applied"
+    except Exception:
+        proposal.status = "failed"
+        raise
+
     await db.commit()
     await db.refresh(proposal)
     return ProposalResponse.model_validate(proposal)
@@ -137,6 +167,7 @@ async def approve_proposal(
 async def deny_proposal(
     run_id: uuid.UUID,
     proposal_id: uuid.UUID,
+    body: DenyRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ProposalResponse:
     result = await db.execute(
@@ -154,6 +185,13 @@ async def deny_proposal(
         )
 
     proposal.status = "denied"
+    feedback = FeedbackEvent(
+        proposal_id=proposal.id,
+        reason=body.reason,
+        category=body.category,
+        disputed_segment_ids=body.disputed_segment_ids,
+    )
+    db.add(feedback)
     await db.commit()
     await db.refresh(proposal)
     return ProposalResponse.model_validate(proposal)
