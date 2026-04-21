@@ -2,6 +2,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -118,6 +119,7 @@ class FeedbackEvent(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(Text, nullable=False)
     disputed_segment_ids: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True) ## float value initlized as none, can be empty (nullable true) until generate an embedding
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )
