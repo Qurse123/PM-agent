@@ -6,6 +6,7 @@ query SearchIssues($filter: IssueFilter, $first: Int, $after: String) {
       title
       state { name }
       assignee { displayName }
+      team { id name }
       description
       createdAt
       updatedAt
