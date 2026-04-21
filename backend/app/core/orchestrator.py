@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.integrations.linear import LinearClient
-from app.models.db import Proposal, ProposalCitation, TranscriptSegment, WorkspaceContext
+from app.models.db import FeedbackEvent, Proposal, ProposalCitation, TranscriptSegment, WorkspaceContext
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
 _jinja_env = Environment(loader=FileSystemLoader(_PROMPTS_DIR), keep_trailing_newline=True)
@@ -140,8 +140,21 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
         for s in segments
     ]
 
-    # PHASE C STUB: retrieve similar feedback_events via pgvector
-    prior_feedback: str = ""  # Phase B: no feedback RAG
+    # Retrieve recent feedback events to inject into system prompt
+    feedback_result = await db.execute(
+        select(FeedbackEvent).order_by(FeedbackEvent.created_at.desc()).limit(20)
+    )
+    feedback_events = list(feedback_result.scalars().all())
+    if feedback_events:
+        lines = ["Past feedback from this workspace (most recent first):"]
+        for fe in feedback_events:
+            line = f"- [{fe.category}] {fe.reason}"
+            if fe.disputed_segment_ids:
+                line += f" (disputed segments: {', '.join(fe.disputed_segment_ids)})"
+            lines.append(line)
+        prior_feedback: str = "\n".join(lines)
+    else:
+        prior_feedback = ""
 
     ctx_result = await db.execute(select(WorkspaceContext).limit(1))
     workspace = ctx_result.scalar_one_or_none()
