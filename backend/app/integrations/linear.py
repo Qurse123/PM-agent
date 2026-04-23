@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -78,15 +79,24 @@ class LinearClient:
             "Authorization": self._api_key,  # Linear: no "Bearer" prefix
             "Content-Type": "application/json",
         }
+        delays = [1.0, 2.0, 4.0]
+        last_response: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            response = await client.post(
-                LINEAR_API_URL,
-                json={"query": query, "variables": variables},
-                headers=headers,
-            )
-            response.raise_for_status()
-            # TODO Phase C: exponential backoff on 429
-            payload = response.json()
-            if "errors" in payload:
-                raise RuntimeError(f"Linear GraphQL error: {payload['errors']}")
-            return payload["data"]
+            for attempt, delay in enumerate(delays + [None]):
+                response = await client.post(
+                    LINEAR_API_URL,
+                    json={"query": query, "variables": variables},
+                    headers=headers,
+                )
+                last_response = response
+                if response.status_code == 429 and delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                response.raise_for_status()
+                payload = response.json() ## converts http response into a python object
+                if "errors" in payload:
+                    raise RuntimeError(f"Linear GraphQL error: {payload['errors']}")
+                return payload["data"]
+        if last_response is not None:
+            last_response.raise_for_status()  # final raise after exhausted retries
+        raise RuntimeError("Linear request failed before receiving a response")

@@ -255,3 +255,30 @@ async def test_create_issue_failure_raises():
         client = LinearClient(api_key="test-key")
         with pytest.raises(RuntimeError, match="Linear issueCreate failed"):
             await client.create_issue(title="Bad", description="", team_id="team-xyz")
+
+
+@pytest.mark.asyncio
+async def test_retries_on_429():
+    """_execute retries up to 3 times on 429 then succeeds on 4th attempt."""
+    ok_resp = _mock_response({"data": {"issue": {"id": "li-1", "title": "T", "url": "u"}}})
+
+    rate_resp = MagicMock()
+    rate_resp.status_code = 429
+    rate_resp.raise_for_status.return_value = None
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=[rate_resp, rate_resp, rate_resp, ok_resp])
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("httpx.AsyncClient", return_value=mock_ctx),
+        patch("app.integrations.linear.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        client = LinearClient(api_key="test-key")
+        result = await client.get_issue("li-1")
+
+    assert result["id"] == "li-1"
+    assert mock_sleep.call_count == 3
+    assert mock_client.post.call_count == 4
