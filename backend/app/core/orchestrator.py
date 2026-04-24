@@ -3,24 +3,29 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import anthropic
-from anthropic.types import MessageParam, ToolParam
 from jinja2 import Environment, FileSystemLoader
+from openai import AsyncOpenAI
+from openai.types.chat import (
+    ChatCompletionMessageFunctionToolCall,
+    ChatCompletionMessageParam,
+    ChatCompletionToolUnionParam,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.integrations.linear import LinearClient
-from app.models.db import FeedbackEvent, Proposal, ProposalCitation, TranscriptSegment, WorkspaceContext
+from app.models.db import Proposal, ProposalCitation, TranscriptSegment, WorkspaceContext
+from app.rag.retrieve import retrieve_similar_feedback
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
 _jinja_env = Environment(loader=FileSystemLoader(_PROMPTS_DIR), keep_trailing_newline=True)
 
 MAX_ITERATIONS = 10
 
-_TOOLS: list[ToolParam] = json.loads(_jinja_env.get_template("linear_tools.j2").render())
+_TOOLS: list[dict] = json.loads(_jinja_env.get_template("linear_tools.j2").render())
 
 
 def _build_system_prompt(
@@ -51,12 +56,15 @@ async def _handle_create_proposal(
         raise ValueError("Proposal must have at least one citation")
 
     for c in citations:
-        for sid in c.get("segment_ids"):
+        seg_ids = c.get("segment_ids") or []
+        for sid in seg_ids:
             if sid not in valid_segment_ids:
                 raise ValueError(f"segment_id '{sid}' not found in transcript")
-        if not c.get("quote").strip():
+        quote = (c.get("quote") or "").strip()
+        rationale = (c.get("rationale") or "").strip()
+        if not quote:
             raise ValueError("Citation must have a non-empty quote")
-        if not c.get("rationale").strip():
+        if not rationale:
             raise ValueError("Citation must have a non-empty rationale")
 
     operation = input_["operation"]
@@ -121,7 +129,6 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
     Run the LLM agent loop for a given run.
     Returns list of proposal IDs created.
     """
-    # Load transcript segments
     result = await db.execute(
         select(TranscriptSegment)
         .where(TranscriptSegment.run_id == run_id)
@@ -140,11 +147,8 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
         for s in segments
     ]
 
-    # Retrieve recent feedback events to inject into system prompt
-    feedback_result = await db.execute(
-        select(FeedbackEvent).order_by(FeedbackEvent.created_at.desc()).limit(20)
-    )
-    feedback_events = list(feedback_result.scalars().all())
+    transcript_summary = " ".join(transcript_lines)[:800]
+    feedback_events = await retrieve_similar_feedback(transcript_summary, db, limit=10)
     if feedback_events:
         lines = ["Past feedback from this workspace (most recent first):"]
         for fe in feedback_events:
@@ -161,49 +165,82 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
 
     system_prompt = _build_system_prompt(transcript_lines, valid_segment_ids, prior_feedback, workspace)
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
     linear = LinearClient(settings.linear_api_key)
 
-    messages: list[MessageParam] = [{"role": "user", "content": "Begin."}]
+    messages: list[ChatCompletionMessageParam] = cast(
+        list[ChatCompletionMessageParam],
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "Begin."},
+        ],
+    )
     proposal_ids: list[uuid.UUID] = []
 
     for _iteration in range(MAX_ITERATIONS):
-        response = await client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=4096,
-            system=system_prompt,
-            tools=_TOOLS,
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            tools=cast(list[ChatCompletionToolUnionParam], _TOOLS),
             messages=messages,
         )
 
-        # Append assistant message
-        messages.append({"role": "assistant", "content": response.content})
+        choice = response.choices[0]
+        msg = choice.message
 
-        if response.stop_reason == "end_turn":
-            break
-
-        # Process ALL tool_use blocks, collect ALL results
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                result = await _dispatch_tool(
-                    name=block.name,
-                    input_=block.input,
-                    linear=linear,
-                    db=db,
-                    run_id=run_id,
-                    valid_segment_ids=valid_segment_ids,
-                    proposal_ids=proposal_ids,
-                )
-                tool_results.append(
+        # Append assistant message (only function tool calls are supported here)
+        assistant_tool_calls: list[dict[str, Any]] | None = None
+        if msg.tool_calls:
+            assistant_tool_calls = []
+            for tc in msg.tool_calls:
+                if getattr(tc, "type", None) != "function":
+                    continue
+                ftc = cast(ChatCompletionMessageFunctionToolCall, tc)
+                assistant_tool_calls.append(
                     {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result),
+                        "id": ftc.id,
+                        "type": "function",
+                        "function": {"name": ftc.function.name, "arguments": ftc.function.arguments},
                     }
                 )
+            if not assistant_tool_calls:
+                assistant_tool_calls = None
 
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
+        messages.append(
+            cast(
+                ChatCompletionMessageParam,
+                {
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": assistant_tool_calls,
+                },
+            )
+        )
+
+        if choice.finish_reason == "stop":
+            break
+
+        for tc in msg.tool_calls or []:
+            if getattr(tc, "type", None) != "function":
+                continue
+            ftc = cast(ChatCompletionMessageFunctionToolCall, tc)
+            result = await _dispatch_tool(
+                name=ftc.function.name,
+                input_=json.loads(ftc.function.arguments),
+                linear=linear,
+                db=db,
+                run_id=run_id,
+                valid_segment_ids=valid_segment_ids,
+                proposal_ids=proposal_ids,
+            )
+            messages.append(
+                cast(
+                    ChatCompletionMessageParam,
+                    {
+                        "role": "tool",
+                        "tool_call_id": ftc.id,
+                        "content": json.dumps(result),
+                    },
+                )
+            )
 
     return proposal_ids

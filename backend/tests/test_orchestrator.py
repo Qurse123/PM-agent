@@ -1,13 +1,16 @@
 """
 Tests for the orchestrator (app/core/orchestrator.py).
 
-Six tests:
-  1. Empty transcript raises ValueError without calling Claude
-  2. Happy path: Claude calls search_linear_issues then create_proposal — proposal is in DB
+Tests:
+  1. Empty transcript raises ValueError without calling the LLM
+  2. Happy path: LLM calls search_linear_issues then create_proposal — proposal is in DB
   3. Citation validation: unknown segment_id → error dict, no DB write
   4. Citation validation: empty citations → error dict, no DB write
-  5. Max iterations: Claude always returns tool_use → loop terminates after MAX_ITERATIONS
-  6. End turn: Claude returns end_turn on first response → loop exits immediately
+  5. Max iterations: LLM always returns tool_calls → loop terminates after MAX_ITERATIONS
+  6. End turn: LLM returns stop on first response → loop exits immediately
+  7. Workspace context is rendered into the system prompt
+  8. No workspace context — orchestrator still works (graceful None)
+  9. Prior feedback events are injected into the system prompt
 """
 
 from __future__ import annotations
@@ -24,31 +27,35 @@ from app.core.orchestrator import MAX_ITERATIONS, run_orchestrator
 
 
 # ---------------------------------------------------------------------------
-# Helper: build fake Anthropic response objects
+# Helper: build fake OpenAI response objects
 # ---------------------------------------------------------------------------
 
 
-def _tool_use_block(name: str, input_: dict, block_id: str = "block-1") -> MagicMock:
-    block = MagicMock()
-    block.type = "tool_use"
-    block.id = block_id
-    block.name = name
-    block.input = input_
-    return block
+def _tool_call(name: str, input_: dict, call_id: str = "call-1") -> MagicMock:
+    fn = MagicMock()
+    fn.name = name
+    fn.arguments = json.dumps(input_)
+    tc = MagicMock()
+    tc.id = call_id
+    tc.type = "function"
+    tc.function = fn
+    return tc
 
 
-def _text_block(text: str = "Done") -> MagicMock:
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
-    return block
-
-
-def _response(content: list, stop_reason: str = "tool_use") -> MagicMock:
+def _response(tool_calls: list | None = None, finish_reason: str = "tool_calls") -> MagicMock:
+    msg = MagicMock()
+    msg.content = None
+    msg.tool_calls = tool_calls or []
+    choice = MagicMock()
+    choice.finish_reason = finish_reason
+    choice.message = msg
     resp = MagicMock()
-    resp.stop_reason = stop_reason
-    resp.content = content
+    resp.choices = [choice]
     return resp
+
+
+def _stop_response() -> MagicMock:
+    return _response(tool_calls=[], finish_reason="stop")
 
 
 # ---------------------------------------------------------------------------
@@ -121,23 +128,18 @@ async def _make_sqlite_engine():
 
 
 def _make_mock_db(segments: list, workspace=None, feedback_events: list | None = None) -> AsyncMock:
-    """Build a mock AsyncSession that returns segments, feedback events, then workspace on execute()."""
+    """Build a mock AsyncSession. feedback_events is unused here — patch retrieve_similar_feedback instead."""
     mock_scalars = MagicMock()
     mock_scalars.all.return_value = segments
 
     segments_result = MagicMock()
     segments_result.scalars.return_value = mock_scalars
 
-    feedback_scalars = MagicMock()
-    feedback_scalars.all.return_value = feedback_events or []
-    feedback_result = MagicMock()
-    feedback_result.scalars.return_value = feedback_scalars
-
     workspace_result = MagicMock()
     workspace_result.scalar_one_or_none.return_value = workspace
 
     db = AsyncMock(spec=AsyncSession)
-    db.execute = AsyncMock(side_effect=[segments_result, feedback_result, workspace_result])
+    db.execute = AsyncMock(side_effect=[segments_result, workspace_result])
     db.add = MagicMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
@@ -167,11 +169,14 @@ async def test_empty_transcript_raises():
     run_id = uuid.uuid4()
     db = _make_mock_db(segments=[])
 
-    with patch("anthropic.AsyncAnthropic") as mock_anthropic_cls:
+    with (
+        patch("app.core.orchestrator.AsyncOpenAI") as mock_openai_cls,
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
+    ):
         with pytest.raises(ValueError, match="No transcript segments"):
             await run_orchestrator(run_id, db)
 
-    mock_anthropic_cls.assert_not_called()
+    mock_openai_cls.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +252,10 @@ async def test_happy_path_creates_proposal():
         captured_proposals.append({"id": pid, "input": input_})
         return {"proposal_id": str(pid), "status": "created"}
 
-    # Claude response sequence:
+    # LLM response sequence:
     # 1) search_linear_issues tool call
     # 2) create_proposal tool call
-    # 3) end_turn
-    search_resp = _response(
-        content=[_tool_use_block("search_linear_issues", {"query": "ship Friday"}, "b1")],
-        stop_reason="tool_use",
-    )
+    # 3) stop
     proposal_input = {
         "target": "linear",
         "operation": "create",
@@ -268,17 +269,14 @@ async def test_happy_path_creates_proposal():
             }
         ],
     }
-    create_resp = _response(
-        content=[_tool_use_block("create_proposal", proposal_input, "b2")],
-        stop_reason="tool_use",
-    )
-    end_resp = _response(content=[_text_block("All done.")], stop_reason="end_turn")
+    search_resp = _response(tool_calls=[_tool_call("search_linear_issues", {"query": "ship Friday"}, "c1")])
+    create_resp = _response(tool_calls=[_tool_call("create_proposal", proposal_input, "c2")])
+    end_resp = _stop_response()
 
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(side_effect=[search_resp, create_resp, end_resp])
-
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(side_effect=[search_resp, create_resp, end_resp])
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
+    mock_client.chat.completions = mock_completions
 
     mock_linear = AsyncMock()
     mock_linear.search_issues = AsyncMock(
@@ -286,9 +284,10 @@ async def test_happy_path_creates_proposal():
     )
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
         patch("app.core.orchestrator._handle_create_proposal", side_effect=_fake_handle_create_proposal),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         result = await run_orchestrator(run_id, mock_db)
 
@@ -325,29 +324,24 @@ async def test_citation_validation_unknown_segment_id():
             }
         ],
     }
-    create_resp = _response(
-        content=[_tool_use_block("create_proposal", bad_proposal_input, "b1")],
-        stop_reason="tool_use",
-    )
-    end_resp = _response(content=[_text_block()], stop_reason="end_turn")
+    create_resp = _response(tool_calls=[_tool_call("create_proposal", bad_proposal_input, "c1")])
+    end_resp = _stop_response()
 
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(side_effect=[create_resp, end_resp])
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(side_effect=[create_resp, end_resp])
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
-
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
     mock_linear.search_issues = AsyncMock(return_value={"issues": []})
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         result = await run_orchestrator(run_id, mock_db)
 
-    # No proposals should be created
     assert result == []
-    # DB add should never have been called
     mock_db.add.assert_not_called()
 
 
@@ -358,7 +352,7 @@ async def test_citation_validation_unknown_segment_id():
 
 @pytest.mark.asyncio
 async def test_citation_validation_empty_citations():
-    """Claude passes citations=[] — error returned, no DB write."""
+    """LLM passes citations=[] — error returned, no DB write."""
     run_id = uuid.uuid4()
     valid_seg_id = f"paste-{run_id}-0000"
     segment = _make_segment(valid_seg_id, run_id)
@@ -371,22 +365,19 @@ async def test_citation_validation_empty_citations():
         "after": {"title": "No citations proposal"},
         "citations": [],
     }
-    create_resp = _response(
-        content=[_tool_use_block("create_proposal", empty_citations_input, "b1")],
-        stop_reason="tool_use",
-    )
-    end_resp = _response(content=[_text_block()], stop_reason="end_turn")
+    create_resp = _response(tool_calls=[_tool_call("create_proposal", empty_citations_input, "c1")])
+    end_resp = _stop_response()
 
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(side_effect=[create_resp, end_resp])
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(side_effect=[create_resp, end_resp])
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
-
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         result = await run_orchestrator(run_id, mock_db)
 
@@ -401,67 +392,59 @@ async def test_citation_validation_empty_citations():
 
 @pytest.mark.asyncio
 async def test_max_iterations_terminates():
-    """Claude always returns stop_reason='tool_use' — loop must terminate after MAX_ITERATIONS."""
+    """LLM always returns tool_calls — loop must terminate after MAX_ITERATIONS."""
     run_id = uuid.uuid4()
     valid_seg_id = f"paste-{run_id}-0000"
     segment = _make_segment(valid_seg_id, run_id)
     mock_db = _make_mock_db(segments=[segment])
 
-    # Every response is a tool_use with search_linear_issues (so it never ends)
-    infinite_resp = _response(
-        content=[_tool_use_block("search_linear_issues", {"query": "test"}, "b1")],
-        stop_reason="tool_use",
-    )
+    infinite_resp = _response(tool_calls=[_tool_call("search_linear_issues", {"query": "test"}, "c1")])
 
-    mock_messages = AsyncMock()
-    # Return the same tool_use response for every call
-    mock_messages.create = AsyncMock(return_value=infinite_resp)
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(return_value=infinite_resp)
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
-
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
     mock_linear.search_issues = AsyncMock(return_value={"issues": []})
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         result = await run_orchestrator(run_id, mock_db)
 
-    # Loop should have terminated — verify Claude was called exactly MAX_ITERATIONS times
-    assert mock_messages.create.call_count == MAX_ITERATIONS
+    assert mock_completions.create.call_count == MAX_ITERATIONS
     assert result == []
 
 
 # ---------------------------------------------------------------------------
-# 6. End turn exits loop immediately
+# 6. Stop exits loop immediately
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_end_turn_exits_loop():
-    """Claude returns end_turn on first response — loop exits after one Claude call."""
+async def test_stop_exits_loop():
+    """LLM returns finish_reason=stop on first response — loop exits after one call."""
     run_id = uuid.uuid4()
     valid_seg_id = f"paste-{run_id}-0000"
     segment = _make_segment(valid_seg_id, run_id)
     mock_db = _make_mock_db(segments=[segment])
 
-    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
-
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(return_value=_stop_response())
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
-
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         result = await run_orchestrator(run_id, mock_db)
 
-    assert mock_messages.create.call_count == 1
+    assert mock_completions.create.call_count == 1
     assert result == []
 
 
@@ -482,22 +465,22 @@ async def test_workspace_context_rendered_in_system_prompt():
 
     mock_db = _make_mock_db(segments=[segment], workspace=workspace)
 
-    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(return_value=_stop_response())
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         await run_orchestrator(run_id, mock_db)
 
-    # Inspect the system prompt passed to Claude
-    call_kwargs = mock_messages.create.call_args.kwargs
-    system_prompt = call_kwargs["system"]
+    # System prompt is messages[0]["content"] in OpenAI format
+    call_kwargs = mock_completions.create.call_args.kwargs
+    system_prompt = call_kwargs["messages"][0]["content"]
     assert "Backend Platform team" in system_prompt
     assert "team-abc" in system_prompt
     assert "infrastructure tickets" in system_prompt
@@ -516,23 +499,22 @@ async def test_no_workspace_context_graceful():
     segment = _make_segment(valid_seg_id, run_id)
     mock_db = _make_mock_db(segments=[segment], workspace=None)
 
-    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(return_value=_stop_response())
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[]),
     ):
         result = await run_orchestrator(run_id, mock_db)
 
     assert result == []
-    call_kwargs = mock_messages.create.call_args.kwargs
-    system_prompt = call_kwargs["system"]
-    # No workspace block should appear
+    call_kwargs = mock_completions.create.call_args.kwargs
+    system_prompt = call_kwargs["messages"][0]["content"]
     assert "WORKSPACE CONTEXT" not in system_prompt
 
 
@@ -543,7 +525,7 @@ async def test_no_workspace_context_graceful():
 
 @pytest.mark.asyncio
 async def test_prior_feedback_injected_in_system_prompt():
-    """When FeedbackEvents exist, system prompt includes their taxonomy and reason."""
+    """When FeedbackEvents exist, system prompt includes their category and reason."""
     run_id = uuid.uuid4()
     valid_seg_id = f"paste-{run_id}-0000"
     segment = _make_segment(valid_seg_id, run_id)
@@ -553,23 +535,23 @@ async def test_prior_feedback_injected_in_system_prompt():
     feedback.reason = "This was about PROJ-999, not the auth ticket"
     feedback.disputed_segment_ids = ["seg-002"]
 
-    mock_db = _make_mock_db(segments=[segment], feedback_events=[feedback])
+    mock_db = _make_mock_db(segments=[segment])
 
-    end_resp = _response(content=[_text_block("Nothing to do.")], stop_reason="end_turn")
-    mock_messages = AsyncMock()
-    mock_messages.create = AsyncMock(return_value=end_resp)
+    mock_completions = AsyncMock()
+    mock_completions.create = AsyncMock(return_value=_stop_response())
     mock_client = MagicMock()
-    mock_client.messages = mock_messages
+    mock_client.chat.completions = mock_completions
     mock_linear = AsyncMock()
 
     with (
-        patch("app.core.orchestrator.anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("app.core.orchestrator.AsyncOpenAI", return_value=mock_client),
         patch("app.core.orchestrator.LinearClient", return_value=mock_linear),
+        patch("app.core.orchestrator.retrieve_similar_feedback", return_value=[feedback]),
     ):
         await run_orchestrator(run_id, mock_db)
 
-    call_kwargs = mock_messages.create.call_args.kwargs
-    system_prompt = call_kwargs["system"]
+    call_kwargs = mock_completions.create.call_args.kwargs
+    system_prompt = call_kwargs["messages"][0]["content"]
     assert "wrong ticket" in system_prompt
     assert "PROJ-999" in system_prompt
     assert "seg-002" in system_prompt
