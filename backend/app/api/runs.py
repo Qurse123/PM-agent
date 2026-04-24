@@ -74,7 +74,7 @@ async def create_run_from_meet(
     """Ingest a transcript directly from the Google Meet REST API."""
     if not authorization.startswith("Bearer"):
         raise HTTPException(status_code=401, detail="Authorization header must start with 'Bearer '")
-    access_token = authorization.removeprefix("Bearer") ## in order to get the value of just the token 
+    access_token = authorization.removeprefix("Bearer ").strip()
 
     run = Run(conference_record_id=request.conference_record_id, status="ingesting")
     db.add(run)
@@ -117,6 +117,31 @@ async def create_run_from_meet(
         created_at=run.created_at,
         segment_count=len(segments),
     )
+
+@router.get("", response_model=list[RunResponse])
+async def list_runs(
+    db: AsyncSession = Depends(get_db),
+) -> list[RunResponse]:
+    """List all runs ordered by most recent first."""
+    result = await db.execute(
+        select(Run).order_by(Run.created_at.desc())
+    )
+    runs = result.scalars().all()
+    counts = []
+    for run in runs:
+        count = await _count_segments(db, run.id)
+        counts.append(count)
+    return [
+        RunResponse(
+            id=run.id,
+            conference_record_id=run.conference_record_id,
+            status=run.status,
+            created_at=run.created_at,
+            segment_count=count,
+        )
+        for run, count in zip(runs, counts)
+    ]
+
 
 @router.post("", response_model=RunResponse, status_code=201)
 async def create_run_from_paste(

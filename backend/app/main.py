@@ -4,6 +4,7 @@ from typing import AsyncGenerator
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.models.db import Base, async_engine
@@ -22,6 +23,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="PM Agent", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(runs_router)
 app.include_router(workspace_router)
 app.include_router(proposals_router)
