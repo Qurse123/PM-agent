@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.integrations.linear import LinearClient
 from app.models.db import FeedbackEvent, Proposal, ProposalCitation, Run, get_db
+from app.rag.embed import embed_text
 
 router = APIRouter(prefix="/runs", tags=["proposals"])
 
@@ -185,13 +186,69 @@ async def deny_proposal(
         )
 
     proposal.status = "denied"
+    embedding = await embed_text(f"{body.category}: {body.reason}")
     feedback = FeedbackEvent(
         proposal_id=proposal.id,
         reason=body.reason,
         category=body.category,
         disputed_segment_ids=body.disputed_segment_ids,
+        embedding=embedding,
     )
     db.add(feedback)
     await db.commit()
     await db.refresh(proposal)
     return ProposalResponse.model_validate(proposal)
+
+
+# ---------------------------------------------------------------------------
+# POST /runs/{run_id}/proposals/approve-all
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{run_id}/proposals/approve-all")
+async def approve_all_proposals(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(select(Run).where(Run.id == run_id))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    pending_result = await db.execute(
+        select(Proposal)
+        .where(Proposal.run_id == run_id, Proposal.status == "pending")
+        .options(selectinload(Proposal.citations))
+        .order_by(Proposal.created_at.asc())
+    )
+    proposals = list(pending_result.scalars().all())
+
+    approved = 0
+    failed = 0
+    results = []
+    linear = LinearClient(settings.linear_api_key)
+
+    for proposal in proposals:
+        proposal.status = "approved"
+        await db.flush()
+        try:
+            if proposal.operation == "create":
+                after = proposal.after
+                await linear.create_issue(
+                    title=after["title"],
+                    description=after.get("description", ""),
+                    team_id=after["teamId"],
+                )
+            elif proposal.operation == "update":
+                if proposal.before is None or "id" not in proposal.before:
+                    raise ValueError("Update proposals must include before.id")
+                await linear.update_issue(proposal.before["id"], proposal.after)
+            proposal.status = "applied"
+            approved += 1
+            results.append({"id": str(proposal.id), "status": "applied"})
+        except Exception as exc:
+            proposal.status = "failed"
+            failed += 1
+            results.append({"id": str(proposal.id), "status": "failed", "error": str(exc)})
+
+    await db.commit()
+    return {"approved": approved, "failed": failed, "results": results}

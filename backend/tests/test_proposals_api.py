@@ -430,16 +430,18 @@ async def test_deny_stores_feedback_event():
 
     app.dependency_overrides[get_db] = _override
     app.state.arq_pool = _mock_arq_pool()
+    fake_vec = [0.1] * 1536
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            resp = await ac.post(
-                f"/runs/{run.id}/proposals/{proposal.id}/deny",
-                json={
-                    "reason": "Wrong issue selected",
-                    "category": "wrong ticket",
-                    "disputed_segment_ids": ["seg-001"],
-                },
-            )
+        with patch("app.api.proposals.embed_text", return_value=fake_vec):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post(
+                    f"/runs/{run.id}/proposals/{proposal.id}/deny",
+                    json={
+                        "reason": "Wrong issue selected",
+                        "category": "wrong ticket",
+                        "disputed_segment_ids": ["seg-001"],
+                    },
+                )
         assert resp.status_code == 200
         assert proposal.status == "denied"
         # FeedbackEvent was added to the session
@@ -448,6 +450,7 @@ async def test_deny_stores_feedback_event():
         assert feedback_arg.reason == "Wrong issue selected"
         assert feedback_arg.category == "wrong ticket"
         assert feedback_arg.disputed_segment_ids == ["seg-001"]
+        assert feedback_arg.embedding == fake_vec
     finally:
         app.dependency_overrides.clear()
 
@@ -475,5 +478,79 @@ async def test_deny_proposal_not_pending():
                 json={"reason": "Already denied", "category": "team policy"},
             )
         assert resp.status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 14. POST approve-all applies all pending proposals
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_all_pending():
+    run = _make_run()
+    p1 = _make_proposal(run.id, status="pending", operation="create")
+    p2 = _make_proposal(run.id, status="pending", operation="create")
+
+    db = _make_db([
+        _scalar_result(run),
+        _scalars_result([p1, p2]),
+    ])
+
+    async def _override():
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    app.state.arq_pool = _mock_arq_pool()
+    try:
+        with patch("app.api.proposals.LinearClient") as mock_lc:
+            mock_linear = AsyncMock()
+            mock_linear.create_issue = AsyncMock(return_value={"id": "issue-1", "title": "t", "url": "u"})
+            mock_lc.return_value = mock_linear
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post(f"/runs/{run.id}/proposals/approve-all")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["approved"] == 2
+        assert data["failed"] == 0
+        assert p1.status == "applied"
+        assert p2.status == "applied"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_approve_all_partial_failure():
+    run = _make_run()
+    p1 = _make_proposal(run.id, status="pending", operation="create")
+    p2 = _make_proposal(run.id, status="pending", operation="create")
+
+    db = _make_db([
+        _scalar_result(run),
+        _scalars_result([p1, p2]),
+    ])
+
+    async def _override():
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    app.state.arq_pool = _mock_arq_pool()
+    try:
+        with patch("app.api.proposals.LinearClient") as mock_lc:
+            mock_linear = AsyncMock()
+            mock_linear.create_issue = AsyncMock(side_effect=[
+                {"id": "i1", "title": "t", "url": "u"},
+                RuntimeError("Linear API down"),
+            ])
+            mock_lc.return_value = mock_linear
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post(f"/runs/{run.id}/proposals/approve-all")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["approved"] == 1
+        assert data["failed"] == 1
+        assert p1.status == "applied"
+        assert p2.status == "failed"
     finally:
         app.dependency_overrides.clear()
