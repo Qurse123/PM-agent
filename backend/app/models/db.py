@@ -34,7 +34,7 @@ class Run(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4) ### primairy key = true means id is the unique identifier of each row
     conference_record_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="ingesting") ## defaults to ingesting when we kick off a run
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     segments: Mapped[list["TranscriptSegment"]] = relationship(  ## shows the relationship between runs and transcipt segment, TS back popluates the runs table
         "TranscriptSegment", back_populates="run", cascade="all, delete-orphan"
@@ -76,7 +76,7 @@ class Proposal(Base):
     after: Mapped[dict] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
     citations: Mapped[list["ProposalCitation"]] = relationship(
@@ -105,7 +105,7 @@ class WorkspaceContext(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     context: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -121,7 +121,7 @@ class FeedbackEvent(Base):
     disputed_segment_ids: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True) ## float value initlized as none, can be empty (nullable true) until generate an embedding
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
     proposal: Mapped["Proposal"] = relationship("Proposal")
