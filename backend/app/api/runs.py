@@ -149,27 +149,21 @@ async def create_run_from_paste(
     db: AsyncSession = Depends(get_db),
 ) -> RunResponse:
     """Ingest a pasted transcript."""
+    run_id = uuid.uuid4()
     run = Run(
-        conference_record_id=request.conference_record_id,
+        id=run_id,
+        conference_record_id=request.conference_record_id or f"paste-{run_id}",
         status="ingesting",
     )
     db.add(run)
-    await db.flush()  # populate run.id
-
-    # Back-fill auto-generated conference_record_id if not provided
-    if not request.conference_record_id:
-        run.conference_record_id = f"paste-{run.id}"
+    await db.flush()
 
     try:
         segments = parse_transcript(request.transcript_text, run.id)
 
         db.add_all(
             [
-                TranscriptSegment(
-                    id=uuid.uuid4(),
-                    run_id=run.id,
-                    **seg,
-                )
+                TranscriptSegment(id=uuid.uuid4(), **seg)
                 for seg in segments
             ]
         )
