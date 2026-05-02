@@ -4,12 +4,12 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ingest.meet import fetch_transcript_entries
+from app.ingest.meet import fetch_conference_display_name, fetch_transcript_entries
 from app.ingest.parser import parse_transcript
-from app.models.db import Run, TranscriptSegment, get_db
+from app.models.db import Proposal, Run, TranscriptSegment, get_db
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -22,10 +22,12 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 class PasteRunRequest(BaseModel):
     transcript_text: str
     conference_record_id: str | None = None  # auto-generated as f"paste-{run_id}" if omitted
+    title: str | None = None  # optional meeting title; auto-extracted from transcript if omitted
 
 
 class MeetRunRequest(BaseModel):
     conference_record_id: str
+    title: str | None = None
 
 
 class SegmentResponse(BaseModel):
@@ -41,15 +43,18 @@ class SegmentResponse(BaseModel):
 class RunResponse(BaseModel):
     id: uuid.UUID
     conference_record_id: str
+    title: str | None = None
     status: str
     created_at: datetime
     segment_count: int
+    proposal_count: int = 0
+    pending_proposal_count: int = 0
 
     model_config = {"from_attributes": True}
 
 
 # ---------------------------------------------------------------------------
-# Helper: count segments for a run
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -60,6 +65,33 @@ async def _count_segments(db: AsyncSession, run_id: uuid.UUID) -> int:
     return result.scalar_one()
 
 
+async def _count_proposals(db: AsyncSession, run_id: uuid.UUID) -> tuple[int, int]:
+    """Returns (total, pending) proposal counts for a run."""
+    result = await db.execute(
+        select(
+            func.count(Proposal.id),
+            func.sum(case((Proposal.status == "pending", 1), else_=0)),
+        ).where(Proposal.run_id == run_id)
+    )
+    total, pending = result.one()
+    return (total or 0), (int(pending) if pending else 0)
+
+
+def _extract_title(text: str) -> str | None:
+    """Return the first non-empty line of the transcript if it is not a speaker turn."""
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # A speaker line looks like "Name: text" — short prefix (≤3 words) before a colon
+        if ": " in line:
+            prefix = line.split(": ", 1)[0]
+            if len(prefix.split()) <= 3:
+                return None  # transcript starts immediately with dialogue — no title
+        return line
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Routes (order matters: specific paths before parameterised ones)
 # ---------------------------------------------------------------------------
@@ -68,7 +100,7 @@ async def _count_segments(db: AsyncSession, run_id: uuid.UUID) -> int:
 @router.post("/from-meet", response_model=RunResponse, status_code=201)
 async def create_run_from_meet(
     request: MeetRunRequest,
-    authorization: str = Header(...), 
+    authorization: str = Header(...),
     db: AsyncSession = Depends(get_db),
 ) -> RunResponse:
     """Ingest a transcript directly from the Google Meet REST API."""
@@ -76,9 +108,13 @@ async def create_run_from_meet(
         raise HTTPException(status_code=401, detail="Authorization header must start with 'Bearer '")
     access_token = authorization.removeprefix("Bearer ").strip()
 
-    run = Run(conference_record_id=request.conference_record_id, status="ingesting")
+    run = Run(
+        conference_record_id=request.conference_record_id,
+        title=request.title,
+        status="ingesting",
+    )
     db.add(run)
-    await db.flush()  # populate run.id without committing 
+    await db.flush()
 
     try:
         segments = await fetch_transcript_entries(
@@ -98,49 +134,51 @@ async def create_run_from_meet(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     db.add_all(
-        [
-            TranscriptSegment(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                **seg, ## unpacks a dictionary into key and value *seg would work with lists
-            )
-            for seg in segments
-        ]
+        [TranscriptSegment(id=uuid.uuid4(), run_id=run.id, **seg) for seg in segments]
     )
+    if not run.title:
+        run.title = await fetch_conference_display_name(
+            request.conference_record_id, access_token
+        )
     run.status = "ready"
     await db.commit()
 
     return RunResponse(
         id=run.id,
         conference_record_id=run.conference_record_id,
+        title=run.title,
         status=run.status,
         created_at=run.created_at,
         segment_count=len(segments),
+        proposal_count=0,
+        pending_proposal_count=0,
     )
+
 
 @router.get("", response_model=list[RunResponse])
 async def list_runs(
     db: AsyncSession = Depends(get_db),
 ) -> list[RunResponse]:
     """List all runs ordered by most recent first."""
-    result = await db.execute(
-        select(Run).order_by(Run.created_at.desc())
-    )
+    result = await db.execute(select(Run).order_by(Run.created_at.desc()))
     runs = result.scalars().all()
-    counts = []
+    responses = []
     for run in runs:
-        count = await _count_segments(db, run.id)
-        counts.append(count)
-    return [
-        RunResponse(
-            id=run.id,
-            conference_record_id=run.conference_record_id,
-            status=run.status,
-            created_at=run.created_at,
-            segment_count=count,
+        seg_count = await _count_segments(db, run.id)
+        proposal_count, pending_count = await _count_proposals(db, run.id)
+        responses.append(
+            RunResponse(
+                id=run.id,
+                conference_record_id=run.conference_record_id,
+                title=run.title,
+                status=run.status,
+                created_at=run.created_at,
+                segment_count=seg_count,
+                proposal_count=proposal_count,
+                pending_proposal_count=pending_count,
+            )
         )
-        for run, count in zip(runs, counts)
-    ]
+    return responses
 
 
 @router.post("", response_model=RunResponse, status_code=201)
@@ -150,9 +188,11 @@ async def create_run_from_paste(
 ) -> RunResponse:
     """Ingest a pasted transcript."""
     run_id = uuid.uuid4()
+    title = request.title or _extract_title(request.transcript_text)
     run = Run(
         id=run_id,
         conference_record_id=request.conference_record_id or f"paste-{run_id}",
+        title=title,
         status="ingesting",
     )
     db.add(run)
@@ -160,13 +200,7 @@ async def create_run_from_paste(
 
     try:
         segments = parse_transcript(request.transcript_text, run.id)
-
-        db.add_all(
-            [
-                TranscriptSegment(id=uuid.uuid4(), **seg)
-                for seg in segments
-            ]
-        )
+        db.add_all([TranscriptSegment(id=uuid.uuid4(), **seg) for seg in segments])
         run.status = "ready"
         await db.commit()
     except Exception as exc:
@@ -177,9 +211,12 @@ async def create_run_from_paste(
     return RunResponse(
         id=run.id,
         conference_record_id=run.conference_record_id,
+        title=run.title,
         status=run.status,
         created_at=run.created_at,
         segment_count=len(segments),
+        proposal_count=0,
+        pending_proposal_count=0,
     )
 
 
@@ -194,15 +231,32 @@ async def get_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    segment_count = await _count_segments(db, run_id)
+    seg_count = await _count_segments(db, run_id)
+    proposal_count, pending_count = await _count_proposals(db, run_id)
 
     return RunResponse(
         id=run.id,
         conference_record_id=run.conference_record_id,
+        title=run.title,
         status=run.status,
         created_at=run.created_at,
-        segment_count=segment_count,
+        segment_count=seg_count,
+        proposal_count=proposal_count,
+        pending_proposal_count=pending_count,
     )
+
+
+@router.delete("/{run_id}", status_code=204)
+async def delete_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    result = await db.execute(select(Run).where(Run.id == run_id))
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    await db.delete(run)
+    await db.commit()
 
 
 @router.get("/{run_id}/segments", response_model=list[SegmentResponse])
