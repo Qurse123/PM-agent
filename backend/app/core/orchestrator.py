@@ -19,13 +19,16 @@ from app.config import settings
 from app.integrations.linear import LinearClient
 from app.models.db import Proposal, ProposalCitation, TranscriptSegment, WorkspaceContext
 from app.rag.retrieve import retrieve_similar_feedback
+import logging
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
-_jinja_env = Environment(loader=FileSystemLoader(_PROMPTS_DIR), keep_trailing_newline=True)
+_jinja_env = Environment(loader=FileSystemLoader(_PROMPTS_DIR), keep_trailing_newline=True, auto_reload=True)
 
 MAX_ITERATIONS = 10
 
-_TOOLS: list[dict] = json.loads(_jinja_env.get_template("linear_tools.j2").render())
+
+def _get_tools() -> list[dict]:
+    return json.loads(_jinja_env.get_template("linear_tools.j2").render())
 
 
 def _build_system_prompt(
@@ -67,17 +70,28 @@ async def _handle_create_proposal(
         if not rationale:
             raise ValueError("Citation must have a non-empty rationale")
 
-    operation = input_["operation"]
+    operation = input_.get("operation")
+    if not operation:
+        raise ValueError("'operation' is required")
     before = input_.get("before")
+    after = input_.get("after")
+    if after is None:
+        raise ValueError(
+            "You omitted the required 'after' field. "
+            "Please re-call create_proposal and include 'after' with the actual proposed field values. "
+            "Example for an update: {\"after\": {\"description\": \"New description text here\"}}. "
+            "Example for a create: {\"after\": {\"title\": \"Issue title\", \"description\": \"Details\", \"teamId\": \"<team_id_from_search_results>\"}}. "
+            "Do NOT call create_proposal again without 'after'."
+        )
     if operation == "update" and before is None:
         raise ValueError("'before' must be provided for update operations")
 
     proposal = Proposal(
         run_id=run_id,
-        target=input_["target"],
+        target=input_.get("target", "linear"),
         operation=operation,
         before=before,
-        after=input_["after"],
+        after=after,
         status="pending",
     )
     db.add(proposal)
@@ -121,6 +135,8 @@ async def _dispatch_tool(
         else:
             return {"error": f"Unknown tool: {name}"}
     except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error("Tool %s input=%s error: %s", name, input_, exc, exc_info=True)
         return {"error": str(exc)}
 
 
@@ -180,12 +196,19 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
     for _iteration in range(MAX_ITERATIONS):
         response = await client.chat.completions.create(
             model="gpt-4o",
-            tools=cast(list[ChatCompletionToolUnionParam], _TOOLS),
+            tools=cast(list[ChatCompletionToolUnionParam], _get_tools()),
             messages=messages,
         )
 
         choice = response.choices[0]
         msg = choice.message
+
+        logging.basicConfig(level=logging.INFO)
+        _log = logging.getLogger(__name__)
+        _log.info("ITER %d finish_reason=%s tool_calls=%s content=%s",
+                  _iteration, choice.finish_reason,
+                  [tc.function.name for tc in (msg.tool_calls or [])],
+                  (msg.content or "")[:200])
 
         # Append assistant message (only function tool calls are supported here)
         assistant_tool_calls: list[dict[str, Any]] | None = None

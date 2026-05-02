@@ -33,23 +33,24 @@
     "type": "function",
     "function": {
       "name": "create_proposal",
-      "description": "Create a proposal to update or create a Linear issue. REQUIRED: Every proposal must include at least one citation referencing segment_ids from the transcript provided. Do not fabricate segment_ids.",
+      "description": "Record a proposed change to a Linear issue for human review. The 'after' field MUST contain the actual new field values you are proposing — it is NOT optional. Example for an update: after={\"description\": \"Updated text with new details\", \"priority\": 1}. Example for a create: after={\"title\": \"New issue title\", \"description\": \"Details\", \"teamId\": \"abc123\"}. You MUST always populate 'after' with real values before calling this tool.",
       "parameters": {
         "type": "object",
         "properties": {
-          "target": {"type": "string", "enum": ["linear"], "description": "Integration target"},
-          "operation": {"type": "string", "enum": ["create", "update"], "description": "Operation type"},
+          "target": {"type": "string", "enum": ["linear"], "description": "Always 'linear'"},
+          "operation": {"type": "string", "enum": ["create", "update"], "description": "'update' to modify an existing issue, 'create' to propose a brand new issue"},
           "before": {
             "type": ["object", "null"],
-            "description": "Current issue state (required for update, null for create)"
+            "description": "Current state of the issue being updated (copy from search results). Use null for create operations."
           },
           "after": {
             "type": "object",
-            "description": "Proposed new issue state or fields to create. For 'create' operations, must include 'title' (string), 'description' (string), and 'teamId' (string, the Linear team ID). For 'update' operations, include only the fields being changed."
+            "description": "REQUIRED. The actual proposed field values. For 'update': only include fields being changed, e.g. {\"description\": \"new description text\"}. For 'create': must include title, description, and teamId.",
+            "minProperties": 1
           },
           "citations": {
             "type": "array",
-            "description": "Evidence from the transcript. Must have at least one entry.",
+            "description": "Transcript evidence. Must have at least one entry with segment_ids, quote, and rationale.",
             "minItems": 1,
             "items": {
               "type": "object",
@@ -57,10 +58,10 @@
                 "segment_ids": {
                   "type": "array",
                   "items": {"type": "string"},
-                  "description": "List of segment_ids from the transcript"
+                  "description": "segment_ids from the VALID SEGMENT IDs list"
                 },
-                "quote": {"type": "string", "description": "Exact text from the transcript"},
-                "rationale": {"type": "string", "description": "Why this citation justifies the proposal"}
+                "quote": {"type": "string", "description": "Exact verbatim text from the transcript"},
+                "rationale": {"type": "string", "description": "Why this quote supports the proposed change"}
               },
               "required": ["segment_ids", "quote", "rationale"]
             }
