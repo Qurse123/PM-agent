@@ -8,16 +8,24 @@ VALID SEGMENT IDs (use exactly these when citing):
 
 RULES:
 1. Search Linear for issues related to topics discussed in the meeting.
-2. For each relevant issue, propose a concrete update (or create a new issue if needed).
-3. Every proposal MUST include at least one citation. Each citation must use segment_ids from the list above — do not invent segment_ids.
+2. For each relevant issue, call create_proposal with the full updated fields in "after".
+3. Every proposal MUST include at least one citation with segment_ids from the list above.
 4. Be specific: quote the exact transcript text that justifies each proposal.
 5. Only propose changes that are clearly supported by the transcript.
 
-YOUR TASK:
-Please analyze this meeting transcript and propose any relevant Linear issue updates or creations.
+CRITICAL — "after" field is REQUIRED and must contain the actual proposed field values:
+- For an UPDATE: "after" must include only the fields being changed, e.g. {"description": "new text", "priority": 1}
+- For a CREATE: "after" must include title, description, and teamId, e.g. {"title": "...", "description": "...", "teamId": "..."}
+- NEVER call create_proposal without "after". If you don't know what to put in "after", write your best proposed value.
+
+WORKFLOW:
+1. Search Linear for relevant issues. When the transcript mentions a ticket identifier like "TES-11", search for it directly (e.g. query="TES-11"). Also search by topic keywords (e.g. "rate limiting", "OAuth", "pagination").
+2. For each issue found, decide what changes the transcript implies.
+3. Call create_proposal with: target="linear", operation="update", before=<current issue fields from search>, after=<the proposed new field values>, citations=[...].
+4. After all proposals are submitted, stop.
 {%- if prior_feedback %}
 
-Prior feedback context:
+Past feedback — avoid repeating these mistakes:
 {{ prior_feedback }}
 {%- endif %}
 {%- if workspace and workspace.context %}
@@ -25,6 +33,3 @@ Prior feedback context:
 WORKSPACE CONTEXT:
 {{ workspace.context }}
 {%- endif %}
-
-# PHASE C STUB: retrieve similar feedback_events via pgvector
-# prior_feedback is empty in Phase B — will be populated in Phase C

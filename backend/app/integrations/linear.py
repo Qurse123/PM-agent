@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import httpx
@@ -22,11 +23,21 @@ class LinearClient:
         first: int = 20,
         after: str | None = None,
     ) -> dict:
-        """Search Linear issues by keyword. Returns {"issues": [...], "pageInfo": {...}}."""
-        variables: dict = {
-            "filter": {"searchableContent": {"contains": query}},
-            "first": first,
-        }
+        """Search Linear issues by keyword or identifier. Returns {"issues": [...], "pageInfo": {...}}."""
+        identifier_match = re.fullmatch(r"[A-Z]+-(\d+)", query.strip())
+        if identifier_match:
+            # Search by number AND content so both paths work
+            issue_number = int(identifier_match.group(1))
+            filter_: dict = {
+                "or": [
+                    {"number": {"eq": issue_number}},
+                    {"searchableContent": {"contains": query}},
+                ]
+            }
+        else:
+            filter_ = {"searchableContent": {"contains": query}}
+
+        variables: dict = {"filter": filter_, "first": first}
         if after is not None:
             variables["after"] = after
 
