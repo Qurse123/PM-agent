@@ -1,66 +1,88 @@
-const BASE = 'http://localhost:8000'
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options?.headers,
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`${res.status} ${res.statusText}: ${text}`);
+  }
+
+  return res.json() as Promise<T>;
+}
 
 export interface Run {
-  id: string
-  conference_record_id: string
-  status: string
-  created_at: string
-  segment_count: number
+  id: string;
+  conference_record_id: string;
+  status: string;
+  created_at: string;
+  segment_count: number;
 }
 
 export interface Citation {
-  id: string
-  segment_ids: string[]
-  quote: string
-  rationale: string
+  id: string;
+  segment_ids: string[];
+  quote: string;
+  rationale: string;
 }
 
 export interface Proposal {
-  id: string
-  run_id: string
-  target: string
-  operation: string
-  before: Record<string, unknown> | null
-  after: Record<string, unknown>
-  status: string
-  created_at: string
-  citations: Citation[]
+  id: string;
+  run_id: string;
+  target: string;
+  operation: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  citations: Citation[];
 }
 
 export interface ApproveAllResult {
-  approved: number
-  failed: number
-  results: { proposal_id: string; status: string; error?: string }[]
+  approved: number;
+  failed: number;
+  results: { proposal_id: string; status: string; error?: string }[];
 }
 
 export interface DenyBody {
-  reason: string
-  category: string
-  disputed_segment_ids: string[]
+  reason: string;
+  category: string;
+  disputed_segment_ids: string[];
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json() as Promise<T>
+export function getRuns(): Promise<Run[]> {
+  return request<Run[]>("/runs");
 }
 
-export const getRuns = () => req<Run[]>('/runs')
+export function getProposals(runId: string): Promise<Proposal[]> {
+  return request<Proposal[]>(`/runs/${runId}/proposals`);
+}
 
-export const getProposals = (runId: string) =>
-  req<Proposal[]>(`/runs/${runId}/proposals`)
+export function approveProposal(runId: string, pid: string): Promise<unknown> {
+  return request<unknown>(`/runs/${runId}/proposals/${pid}/approve`, {
+    method: "POST",
+  });
+}
 
-export const approveProposal = (runId: string, pid: string) =>
-  req<unknown>(`/runs/${runId}/proposals/${pid}/approve`, { method: 'POST' })
-
-export const denyProposal = (runId: string, pid: string, body: DenyBody) =>
-  req<unknown>(`/runs/${runId}/proposals/${pid}/deny`, {
-    method: 'POST',
+export function denyProposal(
+  runId: string,
+  pid: string,
+  body: DenyBody
+): Promise<unknown> {
+  return request<unknown>(`/runs/${runId}/proposals/${pid}/deny`, {
+    method: "POST",
     body: JSON.stringify(body),
-  })
+  });
+}
 
-export const approveAll = (runId: string) =>
-  req<ApproveAllResult>(`/runs/${runId}/proposals/approve-all`, { method: 'POST' })
+export function approveAll(runId: string): Promise<ApproveAllResult> {
+  return request<ApproveAllResult>(`/runs/${runId}/proposals/approve-all`, {
+    method: "POST",
+  });
+}
