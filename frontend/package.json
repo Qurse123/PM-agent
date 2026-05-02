@@ -11,11 +11,12 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
+    "clsx": "^2.1.1",
     "react": "^19.2.5",
-    "react-diff-viewer-continued": "^4.2.2",
     "react-dom": "^19.2.5",
-    "react-router-dom": "^7.14.2",
-    "tailwindcss": "^4.2.4"
+    "tailwind-merge": "^2.6.0",
+    "tailwindcss": "^4.2.4",
+    "wouter": "^3.7.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
