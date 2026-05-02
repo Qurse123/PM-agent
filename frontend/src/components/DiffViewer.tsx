@@ -9,58 +9,77 @@ function formatFieldName(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function formatValue(value: unknown): string {
+const PRIORITY_MAP: Record<string, string> = {
+  "0": "No priority",
+  "1": "Urgent",
+  "2": "High",
+  "3": "Medium",
+  "4": "Low",
+};
+
+function formatValue(key: string, value: unknown): string {
   if (value === null || value === undefined) return "—";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
+  if (key === "priority" || key === "priorityLabel") {
+    const mapped = PRIORITY_MAP[String(value)];
+    if (mapped) return mapped;
+  }
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (obj.name) return String(obj.name);
+    return JSON.stringify(value);
+  }
+  const str = String(value).trim();
+  return str || "—";
+}
+
+function isChanged(key: string, before: Record<string, unknown> | null, after: Record<string, unknown>): boolean {
+  const bVal = before ? formatValue(key, before[key]) : "—";
+  const aVal = formatValue(key, after[key]);
+  return bVal !== aVal;
 }
 
 export default function DiffViewer({ before, after }: DiffViewerProps) {
-  const keys = Object.keys(after);
+  const keys = Object.keys(after).filter((key) =>
+    isChanged(key, before, after)
+  );
+
+  if (keys.length === 0) {
+    return (
+      <p className="text-xs text-slate-400 italic">No field differences detected.</p>
+    );
+  }
 
   return (
-    <div className="overflow-hidden rounded border border-gray-200 text-sm">
+    <div className="rounded-lg border border-slate-200 overflow-hidden text-sm">
       <table className="w-full border-collapse">
         <thead>
-          <tr className="bg-gray-50 border-b border-gray-200">
-            <th className="py-2 px-3 text-left font-medium text-gray-500 text-xs uppercase tracking-wide w-auto whitespace-nowrap">
+          <tr className="bg-slate-50 border-b border-slate-200">
+            <th className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400 w-32">
               Field
             </th>
-            <th className="py-2 px-3 text-left font-medium text-gray-500 text-xs uppercase tracking-wide w-1/2">
+            <th className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400 w-1/2">
               Before
             </th>
-            <th className="py-2 px-3 text-left font-medium text-gray-500 text-xs uppercase tracking-wide w-1/2">
+            <th className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400 w-1/2">
               After
             </th>
           </tr>
         </thead>
-        <tbody>
-          {keys.map((key, i) => {
-            const beforeVal = before ? before[key] : undefined;
-            const afterVal = after[key];
+        <tbody className="divide-y divide-slate-100">
+          {keys.map((key) => {
+            const beforeVal = before ? formatValue(key, before[key]) : "—";
+            const afterVal = formatValue(key, after[key]);
             return (
-              <tr
-                key={key}
-                className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}
-              >
-                <td className="py-2 px-3 font-medium text-gray-700 whitespace-nowrap border-b border-gray-100">
+              <tr key={key}>
+                <td className="py-2.5 px-3 text-sm text-slate-600 font-medium align-top">
                   {formatFieldName(key)}
                 </td>
-                <td
-                  className="py-2 px-3 border-b border-gray-100"
-                  style={{ backgroundColor: "#fee2e2" }}
-                >
-                  <span className="text-red-700 break-words">
-                    {formatValue(beforeVal)}
-                  </span>
+                <td className="py-2.5 px-3 align-top" style={{ backgroundColor: "#fff0f0" }}>
+                  <span className="text-[13px] text-red-700 leading-relaxed">{beforeVal}</span>
                 </td>
-                <td
-                  className="py-2 px-3 border-b border-gray-100"
-                  style={{ backgroundColor: "#dcfce7" }}
-                >
-                  <span className="text-green-700 break-words">
-                    {formatValue(afterVal)}
-                  </span>
+                <td className="py-2.5 px-3 align-top" style={{ backgroundColor: "#f0fff4" }}>
+                  <span className="text-[13px] text-emerald-700 leading-relaxed">{afterVal}</span>
                 </td>
               </tr>
             );
