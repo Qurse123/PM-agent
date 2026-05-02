@@ -14,15 +14,19 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(`${res.status} ${res.statusText}: ${text}`);
   }
 
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
 export interface Run {
   id: string;
   conference_record_id: string;
+  title: string | null;
   status: string;
   created_at: string;
   segment_count: number;
+  proposal_count: number;
+  pending_proposal_count: number;
 }
 
 export interface Citation {
@@ -56,8 +60,28 @@ export interface DenyBody {
   disputed_segment_ids: string[];
 }
 
+export interface CreateRunBody {
+  title: string;
+  transcript_text: string;
+}
+
 export function getRuns(): Promise<Run[]> {
   return request<Run[]>("/runs");
+}
+
+export function getRun(id: string): Promise<Run> {
+  return request<Run>(`/runs/${id}`);
+}
+
+export function createRun(body: CreateRunBody): Promise<Run> {
+  return request<Run>("/runs", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteRun(id: string): Promise<void> {
+  return request<void>(`/runs/${id}`, { method: "DELETE" });
 }
 
 export function getProposals(runId: string): Promise<Proposal[]> {
