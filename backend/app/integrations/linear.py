@@ -24,7 +24,7 @@ class LinearClient:
     ) -> dict:
         """Search Linear issues by keyword. Returns {"issues": [...], "pageInfo": {...}}."""
         variables: dict = {
-            "filter": {"searchableContent": {"containsIgnoreCase": query}},
+            "filter": {"searchableContent": {"contains": query}},
             "first": first,
         }
         if after is not None:

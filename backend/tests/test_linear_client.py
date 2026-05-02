@@ -53,7 +53,7 @@ async def test_search_issues_sends_correct_query():
     body = call_kwargs[1]["json"]
     variables = body["variables"]
     assert (
-        variables["filter"]["searchableContent"]["containsIgnoreCase"] == "fix login"
+        variables["filter"]["searchableContent"]["contains"] == "fix login"
     )
 
 
