@@ -21,6 +21,29 @@ def _parse_time_to_ms(value: str | None) -> int | None:
         return None
 
 
+async def fetch_conference_display_name(
+    conference_record_id: str,
+    access_token: str,
+) -> str | None:
+    """Best-effort fetch of the Google Meet space display name. Returns None on any failure."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            record_resp = await client.get(
+                f"{MEET_BASE}/conferenceRecords/{conference_record_id}",
+                headers=headers,
+            )
+            record_resp.raise_for_status()
+            space = record_resp.json().get("space")
+            if not space:
+                return None
+            space_resp = await client.get(f"{MEET_BASE}/{space}", headers=headers)
+            space_resp.raise_for_status()
+            return space_resp.json().get("displayName") or None
+    except Exception:
+        return None
+
+
 async def fetch_transcript_entries(
     conference_record_id: str,
     access_token: str,
