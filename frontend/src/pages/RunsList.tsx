@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Link } from "wouter";
-import { getRuns, deleteRun, createRun } from "../api";
+import { getRuns, deleteRun, createRun, analyzeRun } from "../api";
 import type { Run } from "../api";
 import { relativeTime, formatMeetingName } from "../lib/utils";
 
@@ -46,6 +46,31 @@ function SmallSpinner() {
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
     </svg>
+  );
+}
+
+function ProcessingCard({ run }: { run: Run }) {
+  const meetingName = run.title ?? run.conference_record_id;
+  return (
+    <div className="relative bg-white rounded-xl border border-blue-200 shadow-sm overflow-hidden">
+      {/* animated shimmer bar */}
+      <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-200 via-indigo-400 to-blue-200 animate-[shimmer_1.8s_ease-in-out_infinite] bg-[length:200%_100%]" />
+      <div className="px-4 pt-4 pb-4">
+        <div className="flex items-center gap-2 mb-2">
+          <svg className="animate-spin h-3.5 w-3.5 text-blue-500 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <span className="text-[11px] font-medium text-blue-600">Generating proposals…</span>
+        </div>
+        <p className="text-[15px] font-semibold text-slate-700 leading-snug">{meetingName}</p>
+        <div className="mt-3 space-y-1.5">
+          <div className="h-2.5 bg-slate-100 rounded-full w-full animate-pulse" />
+          <div className="h-2.5 bg-slate-100 rounded-full w-4/5 animate-pulse" />
+          <div className="h-2.5 bg-slate-100 rounded-full w-3/5 animate-pulse" />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -195,21 +220,29 @@ export default function RunsList() {
   const [error, setError] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
-  const [newTranscript, setNewTranscript] = useState("");
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [submitProgress, setSubmitProgress] = useState<{ done: number; total: number } | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  function fetchRuns() {
+  const fetchRuns = useCallback(() => {
     getRuns()
       .then(setRuns)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load runs"))
       .finally(() => setLoading(false));
-  }
+  }, []);
 
-  useEffect(() => { fetchRuns(); }, []);
+  useEffect(() => { fetchRuns(); }, [fetchRuns]);
+
+  // Poll while any run is still processing
+  useEffect(() => {
+    const hasProcessing = runs.some((r) => r.status === "analyzing" || r.status === "ingesting");
+    if (!hasProcessing) return;
+    const id = setInterval(fetchRuns, 4000);
+    return () => clearInterval(id);
+  }, [runs, fetchRuns]);
 
   function handleDelete(id: string) {
     setRuns((prev) => prev.filter((r) => r.id !== id));
@@ -218,32 +251,52 @@ export default function RunsList() {
   function openPanel() {
     setPanelOpen(true);
     setNewTitle("");
-    setNewTranscript("");
-    setUploadedFile(null);
+    setUploadedFiles([]);
     setSubmitError(null);
+    setSubmitProgress(null);
     setTimeout(() => titleRef.current?.focus(), 50);
   }
 
   function closePanel() {
     setPanelOpen(false);
     setSubmitError(null);
+    setSubmitProgress(null);
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadedFile(file);
-    const reader = new FileReader();
-    reader.onload = (ev) => setNewTranscript((ev.target?.result as string) ?? "");
-    reader.readAsText(file);
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
+    setUploadedFiles(files);
+  }
+
+  function readFileText(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => resolve((ev.target?.result as string) ?? "");
+      reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+      reader.readAsText(file);
+    });
+  }
+
+  function titleFromFile(file: File): string {
+    return file.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ").trim();
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setSubmitError(null);
+    const isSingle = uploadedFiles.length === 1;
+    setSubmitProgress({ done: 0, total: uploadedFiles.length });
     try {
-      await createRun({ title: newTitle.trim(), transcript_text: newTranscript.trim() });
+      for (let i = 0; i < uploadedFiles.length; i++) {
+        const file = uploadedFiles[i];
+        const text = await readFileText(file);
+        const title = isSingle && newTitle.trim() ? newTitle.trim() : titleFromFile(file);
+        const run = await createRun({ title, transcript_text: text.trim() });
+        analyzeRun(run.id).catch(() => { /* worker may not be running; run stays in ready */ });
+        setSubmitProgress({ done: i + 1, total: uploadedFiles.length });
+      }
       setPanelOpen(false);
       setLoading(true);
       fetchRuns();
@@ -251,17 +304,19 @@ export default function RunsList() {
       setSubmitError(err instanceof Error ? err.message : "Failed to create run");
     } finally {
       setSubmitting(false);
+      setSubmitProgress(null);
     }
   }
 
-  const toReview = runs.filter((r) => r.pending_proposal_count > 0 || r.proposal_count === 0);
-  const reviewed = runs.filter((r) => r.proposal_count > 0 && r.pending_proposal_count === 0);
+  const processing = runs.filter((r) => r.status === "analyzing" || r.status === "ingesting");
+  const toReview = runs.filter((r) => r.status === "ready" && (r.pending_proposal_count > 0 || r.proposal_count === 0));
+  const reviewed = runs.filter((r) => r.status === "ready" && r.proposal_count > 0 && r.pending_proposal_count === 0);
 
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Top nav */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-10 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="flex items-center justify-center h-7 w-7 rounded-lg bg-indigo-600">
               <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -284,7 +339,7 @@ export default function RunsList() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="max-w-7xl mx-auto px-10 py-10">
         <div className="mb-6">
           <h1 className="text-xl font-semibold text-slate-900">Analysis runs</h1>
           <p className="mt-0.5 text-sm text-slate-500">Each run analyzes a meeting transcript and proposes ticket updates.</p>
@@ -302,39 +357,55 @@ export default function RunsList() {
               </button>
             </div>
             <form onSubmit={handleSubmit} className="px-5 py-4 space-y-4">
+              {/* Title field — only for single-file uploads */}
+              {uploadedFiles.length <= 1 && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                    Meeting title {uploadedFiles.length === 0 && <span className="text-red-500">*</span>}
+                    {uploadedFiles.length === 1 && <span className="text-slate-400">(optional — defaults to filename)</span>}
+                  </label>
+                  <input
+                    ref={titleRef}
+                    type="text"
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    placeholder="Q3 Engineering Planning"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                    required={uploadedFiles.length === 0}
+                  />
+                </div>
+              )}
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1.5">Meeting title <span className="text-red-500">*</span></label>
-                <input
-                  ref={titleRef}
-                  type="text"
-                  value={newTitle}
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="Q3 Engineering Planning"
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1.5">Transcript <span className="text-red-500">*</span></label>
+                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                  Transcript{uploadedFiles.length > 1 ? "s" : ""} <span className="text-red-500">*</span>
+                  {uploadedFiles.length > 1 && (
+                    <span className="ml-1.5 text-slate-400 font-normal">Each file creates a separate run</span>
+                  )}
+                </label>
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept=".txt,.vtt,.srt,.md,text/plain"
+                  multiple
                   className="hidden"
                   onChange={handleFileChange}
                 />
-                {uploadedFile ? (
-                  <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <svg className="h-4 w-4 text-slate-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-                      </svg>
-                      <span className="text-sm text-slate-700 truncate">{uploadedFile.name}</span>
-                      <span className="text-xs text-slate-400 shrink-0">({(uploadedFile.size / 1024).toFixed(1)} KB)</span>
+                {uploadedFiles.length > 0 ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 divide-y divide-slate-100">
+                    {uploadedFiles.map((f) => (
+                      <div key={f.name} className="flex items-center gap-2 px-4 py-2.5">
+                        <svg className="h-4 w-4 text-slate-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                        </svg>
+                        <span className="text-sm text-slate-700 truncate flex-1">{f.name}</span>
+                        <span className="text-xs text-slate-400 shrink-0">{(f.size / 1024).toFixed(1)} KB</span>
+                      </div>
+                    ))}
+                    <div className="px-4 py-2.5">
+                      <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs text-indigo-600 hover:text-indigo-800">
+                        Change files
+                      </button>
                     </div>
-                    <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs text-indigo-600 hover:text-indigo-800 shrink-0 ml-3">
-                      Change
-                    </button>
                   </div>
                 ) : (
                   <button
@@ -345,8 +416,8 @@ export default function RunsList() {
                     <svg className="mx-auto h-8 w-8 text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                     </svg>
-                    <p className="text-sm font-medium text-slate-600">Click to upload transcript</p>
-                    <p className="text-xs text-slate-400 mt-1">.txt, .vtt, .srt, .md</p>
+                    <p className="text-sm font-medium text-slate-600">Click to upload transcripts</p>
+                    <p className="text-xs text-slate-400 mt-1">.txt, .vtt, .srt, .md · select multiple for batch</p>
                   </button>
                 )}
               </div>
@@ -357,10 +428,14 @@ export default function RunsList() {
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting || !newTitle.trim() || !uploadedFile}
+                  disabled={submitting || uploadedFiles.length === 0}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
                 >
-                  {submitting ? <><SmallSpinner /> Creating…</> : "Create run"}
+                  {submitting && submitProgress
+                    ? <><SmallSpinner /> Creating {submitProgress.done + 1} of {submitProgress.total}…</>
+                    : uploadedFiles.length > 1
+                      ? `Create ${uploadedFiles.length} runs`
+                      : "Create run"}
                 </button>
               </div>
             </form>
@@ -386,7 +461,25 @@ export default function RunsList() {
         )}
 
         {!loading && !error && (
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-3 gap-8">
+            {/* Processing column — custom render with ProcessingCard */}
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-2 mb-3 pb-2.5 border-b-2 border-blue-400">
+                <span className="text-sm font-semibold text-slate-700">Processing</span>
+                <span className="inline-flex items-center justify-center rounded-full bg-slate-100 text-slate-500 text-xs font-medium px-2 py-0.5 min-w-[20px]">
+                  {processing.length}
+                </span>
+              </div>
+              <div className="space-y-3 flex-1">
+                {processing.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 px-4 py-10 text-center">
+                    <p className="text-xs text-slate-400">Uploaded runs appear here</p>
+                  </div>
+                ) : (
+                  processing.map((run) => <ProcessingCard key={run.id} run={run} />)
+                )}
+              </div>
+            </div>
             <Column
               title="To Review"
               count={toReview.length}

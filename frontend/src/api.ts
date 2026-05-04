@@ -110,3 +110,9 @@ export function approveAll(runId: string): Promise<ApproveAllResult> {
     method: "POST",
   });
 }
+
+export function analyzeRun(runId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/runs/${runId}/analyze`, {
+    method: "POST",
+  });
+}
