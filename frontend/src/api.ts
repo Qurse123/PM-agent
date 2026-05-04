@@ -27,6 +27,14 @@ export interface Run {
   segment_count: number;
   proposal_count: number;
   pending_proposal_count: number;
+  linear_team_id: string | null;
+}
+
+export interface LinearTeam {
+  linear_team_id: string;
+  name: string;
+  key: string;
+  description: string | null;
 }
 
 export interface Citation {
@@ -63,6 +71,7 @@ export interface DenyBody {
 export interface CreateRunBody {
   title: string;
   transcript_text: string;
+  linear_team_id?: string | null;
 }
 
 export function getRuns(): Promise<Run[]> {
@@ -115,4 +124,8 @@ export function analyzeRun(runId: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/runs/${runId}/analyze`, {
     method: "POST",
   });
+}
+
+export function listTeams(): Promise<LinearTeam[]> {
+  return request<LinearTeam[]>("/workspace/teams");
 }

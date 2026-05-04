@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Link } from "wouter";
-import { getRuns, deleteRun, createRun, analyzeRun } from "../api";
-import type { Run } from "../api";
+import { getRuns, deleteRun, createRun, analyzeRun, listTeams } from "../api";
+import type { Run, LinearTeam } from "../api";
 import { relativeTime, formatMeetingName } from "../lib/utils";
 
 const STATUS_DOT: Record<string, string> = {
@@ -22,7 +22,7 @@ function StatusPill({ status }: { status: string }) {
   const dot  = STATUS_DOT[status]  ?? "bg-slate-400";
   const pill = STATUS_PILL[status] ?? "bg-slate-100 text-slate-600";
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${pill}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${pill}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
       {status}
     </span>
@@ -61,9 +61,9 @@ function ProcessingCard({ run }: { run: Run }) {
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <span className="text-[11px] font-medium text-blue-600">Generating proposals…</span>
+          <span className="text-xs font-medium text-blue-600">Generating proposals…</span>
         </div>
-        <p className="text-[15px] font-semibold text-slate-700 leading-snug">{meetingName}</p>
+        <p className="text-lg font-semibold text-slate-700 leading-snug">{meetingName}</p>
         <div className="mt-3 space-y-1.5">
           <div className="h-2.5 bg-slate-100 rounded-full w-full animate-pulse" />
           <div className="h-2.5 bg-slate-100 rounded-full w-4/5 animate-pulse" />
@@ -122,7 +122,7 @@ function RunCard({ run, onDelete }: RunCardProps) {
         <div className="flex flex-wrap items-center gap-1.5 mb-2">
           <StatusPill status={run.status} />
           {allReviewed && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 px-2 py-0.5 text-[11px] font-medium">
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 px-2 py-0.5 text-xs font-medium">
               <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
               </svg>
@@ -130,19 +130,19 @@ function RunCard({ run, onDelete }: RunCardProps) {
             </span>
           )}
           {pendingCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200 px-2 py-0.5 text-[11px] font-medium">
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200 px-2 py-0.5 text-xs font-medium">
               {pendingCount} pending
             </span>
           )}
         </div>
 
         {/* Meeting name */}
-        <p className="text-[15px] font-semibold text-slate-900 mb-2 leading-snug pr-2">
+        <p className="text-lg font-semibold text-slate-900 mb-2 leading-snug pr-2">
           {meetingName}
         </p>
 
         {/* Meta row */}
-        <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-400">
+        <div className="flex flex-wrap items-center gap-2.5 text-sm text-slate-400">
           {proposalCount > 0 && (
             <span className="flex items-center gap-1">
               <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -193,9 +193,9 @@ function Column({
 }) {
   return (
     <div className="flex flex-col min-w-0">
-      <div className={`flex items-center gap-2 mb-3 pb-2.5 border-b-2 ${accent}`}>
-        <span className="text-sm font-semibold text-slate-700">{title}</span>
-        <span className="inline-flex items-center justify-center rounded-full bg-slate-100 text-slate-500 text-xs font-medium px-2 py-0.5 min-w-[20px]">
+      <div className={`flex items-center gap-2 mb-4 pb-3 border-b-2 ${accent}`}>
+        <span className="text-base font-semibold text-slate-700">{title}</span>
+        <span className="inline-flex items-center justify-center rounded-full bg-slate-100 text-slate-500 text-sm font-medium px-2.5 py-0.5 min-w-[24px]">
           {count}
         </span>
       </div>
@@ -224,8 +224,13 @@ export default function RunsList() {
   const [submitting, setSubmitting] = useState(false);
   const [submitProgress, setSubmitProgress] = useState<{ done: number; total: number } | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [teams, setTeams] = useState<LinearTeam[]>([]);
+  const [selectedTeamId, setSelectedTeamId] = useState<string>("");
   const titleRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const ACCEPTED_EXTS = new Set([".txt", ".vtt", ".srt", ".md"]);
 
   const fetchRuns = useCallback(() => {
     getRuns()
@@ -235,6 +240,10 @@ export default function RunsList() {
   }, []);
 
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
+
+  useEffect(() => {
+    listTeams().then(setTeams).catch(() => {});
+  }, []);
 
   // Poll while any run is still processing
   useEffect(() => {
@@ -254,6 +263,7 @@ export default function RunsList() {
     setUploadedFiles([]);
     setSubmitError(null);
     setSubmitProgress(null);
+    setSelectedTeamId("");
     setTimeout(() => titleRef.current?.focus(), 50);
   }
 
@@ -267,6 +277,18 @@ export default function RunsList() {
     const files = Array.from(e.target.files ?? []);
     if (!files.length) return;
     setUploadedFiles(files);
+    e.target.value = "";
+  }
+
+  function handleFolderChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const all = Array.from(e.target.files ?? []);
+    const transcripts = all.filter((f) => {
+      const ext = f.name.slice(f.name.lastIndexOf(".")).toLowerCase();
+      return ACCEPTED_EXTS.has(ext);
+    });
+    if (transcripts.length) setUploadedFiles(transcripts);
+    else setSubmitError(`No .txt / .vtt / .srt / .md files found in that folder`);
+    e.target.value = "";
   }
 
   function readFileText(file: File): Promise<string> {
@@ -293,7 +315,7 @@ export default function RunsList() {
         const file = uploadedFiles[i];
         const text = await readFileText(file);
         const title = isSingle && newTitle.trim() ? newTitle.trim() : titleFromFile(file);
-        const run = await createRun({ title, transcript_text: text.trim() });
+        const run = await createRun({ title, transcript_text: text.trim(), linear_team_id: selectedTeamId || null });
         analyzeRun(run.id).catch(() => { /* worker may not be running; run stays in ready */ });
         setSubmitProgress({ done: i + 1, total: uploadedFiles.length });
       }
@@ -316,16 +338,16 @@ export default function RunsList() {
     <div className="min-h-screen bg-slate-50">
       {/* Top nav */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-10 h-14 flex items-center justify-between">
+        <div className="max-w-screen-2xl mx-auto px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="flex items-center justify-center h-7 w-7 rounded-lg bg-indigo-600">
               <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
               </svg>
             </div>
-            <span className="font-semibold text-slate-900">PM Agent</span>
+            <span className="text-lg font-semibold text-slate-900">PM Agent</span>
             <span className="text-slate-300">·</span>
-            <span className="text-sm text-slate-400">AI ticket proposal review</span>
+            <span className="text-base text-slate-400">AI ticket proposal review</span>
           </div>
           <button
             onClick={openPanel}
@@ -339,10 +361,10 @@ export default function RunsList() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-10 py-10">
+      <main className="max-w-screen-2xl mx-auto px-8 py-10">
         <div className="mb-6">
-          <h1 className="text-xl font-semibold text-slate-900">Analysis runs</h1>
-          <p className="mt-0.5 text-sm text-slate-500">Each run analyzes a meeting transcript and proposes ticket updates.</p>
+          <h1 className="text-2xl font-semibold text-slate-900">Analysis runs</h1>
+          <p className="mt-1 text-base text-slate-500">Each run analyzes a meeting transcript and proposes ticket updates.</p>
         </div>
 
         {/* New run panel */}
@@ -368,11 +390,39 @@ export default function RunsList() {
                     ref={titleRef}
                     type="text"
                     value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewTitle(val);
+                      const lower = val.toLowerCase();
+                      const match = teams.find(
+                        (t) => lower.includes(t.name.toLowerCase()) || lower.includes(t.key.toLowerCase())
+                      );
+                      setSelectedTeamId(match ? match.linear_team_id : "");
+                    }}
                     placeholder="Q3 Engineering Planning"
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                     required={uploadedFiles.length === 0}
                   />
+                </div>
+              )}
+              {teams.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                    Team board
+                    <span className="ml-1.5 text-slate-400 font-normal">(auto-matched from title)</span>
+                  </label>
+                  <select
+                    value={selectedTeamId}
+                    onChange={(e) => setSelectedTeamId(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  >
+                    <option value="">All teams (no filter)</option>
+                    {teams.map((t) => (
+                      <option key={t.linear_team_id} value={t.linear_team_id}>
+                        {t.name} ({t.key})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               )}
               <div>
@@ -382,6 +432,7 @@ export default function RunsList() {
                     <span className="ml-1.5 text-slate-400 font-normal">Each file creates a separate run</span>
                   )}
                 </label>
+                {/* Hidden inputs */}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -390,6 +441,15 @@ export default function RunsList() {
                   className="hidden"
                   onChange={handleFileChange}
                 />
+                <input
+                  ref={folderInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={handleFolderChange}
+                  // @ts-expect-error — webkitdirectory is not in React's typedefs
+                  webkitdirectory=""
+                />
+
                 {uploadedFiles.length > 0 ? (
                   <div className="rounded-lg border border-slate-200 bg-slate-50 divide-y divide-slate-100">
                     {uploadedFiles.map((f) => (
@@ -401,24 +461,41 @@ export default function RunsList() {
                         <span className="text-xs text-slate-400 shrink-0">{(f.size / 1024).toFixed(1)} KB</span>
                       </div>
                     ))}
-                    <div className="px-4 py-2.5">
+                    <div className="px-4 py-2.5 flex gap-3">
                       <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs text-indigo-600 hover:text-indigo-800">
                         Change files
+                      </button>
+                      <span className="text-slate-300">·</span>
+                      <button type="button" onClick={() => folderInputRef.current?.click()} className="text-xs text-indigo-600 hover:text-indigo-800">
+                        Change folder
                       </button>
                     </div>
                   </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full rounded-lg border-2 border-dashed border-slate-300 hover:border-indigo-400 bg-white hover:bg-indigo-50 px-4 py-8 text-center transition-colors"
-                  >
-                    <svg className="mx-auto h-8 w-8 text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                    </svg>
-                    <p className="text-sm font-medium text-slate-600">Click to upload transcripts</p>
-                    <p className="text-xs text-slate-400 mt-1">.txt, .vtt, .srt, .md · select multiple for batch</p>
-                  </button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="rounded-lg border-2 border-dashed border-slate-300 hover:border-indigo-400 bg-white hover:bg-indigo-50 px-4 py-8 text-center transition-colors"
+                    >
+                      <svg className="mx-auto h-7 w-7 text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                      </svg>
+                      <p className="text-sm font-medium text-slate-600">Upload files</p>
+                      <p className="text-xs text-slate-400 mt-1">.txt, .vtt, .srt, .md</p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => folderInputRef.current?.click()}
+                      className="rounded-lg border-2 border-dashed border-slate-300 hover:border-indigo-400 bg-white hover:bg-indigo-50 px-4 py-8 text-center transition-colors"
+                    >
+                      <svg className="mx-auto h-7 w-7 text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+                      </svg>
+                      <p className="text-sm font-medium text-slate-600">Upload folder</p>
+                      <p className="text-xs text-slate-400 mt-1">Scans for transcript files</p>
+                    </button>
+                  </div>
                 )}
               </div>
               {submitError && <p className="text-sm text-red-600">{submitError}</p>}
@@ -461,12 +538,12 @@ export default function RunsList() {
         )}
 
         {!loading && !error && (
-          <div className="grid grid-cols-3 gap-8">
+          <div className="grid grid-cols-3 gap-6">
             {/* Processing column — custom render with ProcessingCard */}
             <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-2 mb-3 pb-2.5 border-b-2 border-blue-400">
-                <span className="text-sm font-semibold text-slate-700">Processing</span>
-                <span className="inline-flex items-center justify-center rounded-full bg-slate-100 text-slate-500 text-xs font-medium px-2 py-0.5 min-w-[20px]">
+              <div className="flex items-center gap-2 mb-4 pb-3 border-b-2 border-blue-400">
+                <span className="text-base font-semibold text-slate-700">Processing</span>
+                <span className="inline-flex items-center justify-center rounded-full bg-slate-100 text-slate-500 text-sm font-medium px-2.5 py-0.5 min-w-[24px]">
                   {processing.length}
                 </span>
               </div>
