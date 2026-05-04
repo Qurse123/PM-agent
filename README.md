@@ -1,6 +1,6 @@
 # PM Agent
 
-An AI-powered meeting agent that keeps Jira and Linear tickets up to date using Google Meet transcripts. Every proposed ticket change is **citation-grounded** — the model cites the exact transcript segments that justify each edit. Your team reviews a diff before anything is written. test
+An AI-powered meeting agent that keeps Jira and Linear tickets up to date using Google Meet transcripts. Every proposed ticket change is **citation-grounded** — the model cites the exact transcript segments that justify each edit. Your team reviews a diff before anything is written. 
 
 ## How It Works
 
