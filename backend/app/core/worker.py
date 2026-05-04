@@ -19,7 +19,7 @@ async def orchestrate_run(ctx: dict, run_id_str: str) -> None:
         if run is None or run.status != "analyzing": 
             return 
         try:
-            await run_orchestrator(run_id, db) ## run the run_orch funtion 
+            await run_orchestrator(run_id, db, team_id=run.linear_team_id)
             run.status = "ready"
         except Exception:
             run.status = "failed"
