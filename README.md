@@ -65,10 +65,11 @@ PM agent/
 │   │   ├── rag/            # Feedback embeddings, pgvector retrieval
 │   │   ├── models/         # SQLAlchemy models
 │   │   └── config.py
+│   ├── Dockerfile
 │   ├── tests/
 │   ├── requirements.txt
 │   └── .env.example
-├── frontend/               # Diff + citations review UI
+├── frontend/               # React + Vite diff + citations review UI (always run locally)
 ├── docker-compose.yml
 ├── AGENTS.md               # Full project context for coding agents
 └── CLAUDE.md               # Claude Code entry point (imports AGENTS.md)
@@ -76,36 +77,105 @@ PM agent/
 
 ## Getting Started
 
-**Prerequisites:** Docker, Node.js 20+, Python 3.11+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes `docker compose`)
+- Node.js 20+ (for the frontend — not Dockerized)
+- Python 3.11+ (only needed for the **Local Dev** path below)
+
+### API Keys
+
+You need two keys before running anything:
+
+- **OpenAI API key** — [platform.openai.com](https://platform.openai.com) → API keys → Create new secret key
+- **Linear API key** — Linear app → Settings → API → Personal API keys → Create key
+
+Copy the example env file and fill in both keys:
 
 ```bash
-# 1. Clone and configure
+cp backend/.env.example backend/.env
+# Edit backend/.env — set openai_api_key and linear_api_key at minimum
+```
+
+---
+
+### Option A — Fully Docker (recommended)
+
+All backend services (Postgres, Redis, API server, background worker) run as Docker containers. The frontend is always run locally.
+
+```bash
+# 1. Clone
 git clone https://github.com/Qurse123/PM-agent.git
 cd pm-agent
-cp backend/.env.example backend/.env   # fill in API keys
 
-# 2. Start Postgres + Redis
+# 2. Configure env
+cp backend/.env.example backend/.env
+# Fill in openai_api_key and linear_api_key in backend/.env
+
+# 3. Start all backend services
 docker compose up -d
 
-# 3. Run database migrations
-cd backend && alembic upgrade head
+# 4. Run database migrations (inside the backend container)
+docker compose exec backend alembic upgrade head
 
-# 4. Start the API server
-uvicorn app.main:app --reload
-
-# 5. Start the background worker (separate terminal)
-python run_worker.py
-
-# 6. Start the frontend (separate terminal)
+# 5. Start the frontend (separate terminal — not Dockerized)
 cd frontend && npm install && npm run dev
 ```
 
 The review UI is at `http://localhost:5173` and the API at `http://localhost:8000`.
 
+To stop everything: `docker compose down`
+
+---
+
+### Option B — Local Dev (backend runs on host)
+
+Use this if you want to run the API server and worker directly on your machine (e.g. for faster iteration with a debugger attached). Only Postgres and Redis run in Docker.
+
+```bash
+# 1. Clone
+git clone https://github.com/Qurse123/PM-agent.git
+cd pm-agent
+
+# 2. Configure env
+cp backend/.env.example backend/.env
+# Fill in openai_api_key and linear_api_key in backend/.env
+
+# 3. Start only Postgres and Redis
+docker compose up -d postgres redis
+
+# 4. Set up Python environment
+cd backend
+python -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# 5. Run database migrations
+alembic upgrade head
+
+# 6. Start the API server
+uvicorn app.main:app --reload
+
+# 7. Start the background worker (separate terminal, venv active)
+python run_worker.py
+
+# 8. Start the frontend (separate terminal)
+cd ../frontend && npm install && npm run dev
+```
+
+The review UI is at `http://localhost:5173` and the API at `http://localhost:8000`.
+
+> **Note:** When running locally, `DATABASE_URL` and `REDIS_URL` in `.env` use `localhost`. The Docker-only path overrides these to use Docker service names — don't mix the two.
+
+---
+
 ## Running Tests
 
 ```bash
 cd backend
+
+# Activate venv if using local dev path
+source venv/bin/activate
 
 # Unit tests (no external dependencies)
 pytest tests/ -v
@@ -113,6 +183,12 @@ pytest tests/ -v
 # Integration tests (requires Postgres + pgvector running)
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/pm_agent \
   pytest tests/test_integration_postgres.py -v
+```
+
+When running in Docker, you can also run tests inside the container:
+
+```bash
+docker compose exec backend pytest tests/ -v
 ```
 
 CI runs both automatically — the integration tests are skipped if `DATABASE_URL` doesn't point to Postgres.
