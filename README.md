@@ -16,24 +16,28 @@ Before drafting proposals, the agent runs a **RAG retrieval step** — querying 
 ## Architecture
 
 ```
-Google Workspace OAuth
+Transcript file upload (.txt / .vtt / .srt)
         |
         v
-  Meet REST API  →  transcript_segments (immutable, stable segment_id)
+  transcript_segments (immutable, stable segment_id)
         |
         v
-  Orchestrator (Claude + tools)
-    ├── Jira REST search/read
+  RAG retrieval → pgvector similarity search over past feedback_events
+        |
+        v
+  Orchestrator (OpenAI + tools)
     ├── Linear GraphQL search/read
-    └── RAG: prior feedback_events via pgvector
+    └── Citation validator (segment_ids must exist — enforced in code)
         |
         v
   Proposals + proposal_citations (segment_id refs + quote + rationale)
         |
         v
-  Diff UI + citations panel
-    ├── Approve → write to Jira / Linear
-    └── Deny   → feedback_event (reason + disputed_segment_ids) → embed → retrieve next run
+  Kanban review UI (Processing → To Review → Reviewed)
+    ├── Approve → write to Linear
+    └── Deny   → feedback_event (reason + disputed_segment_ids) → embed → pgvector
+                    |
+                    └── retrieved on next run by RAG step
 ```
 
 ## Tech Stack
@@ -42,10 +46,10 @@ Google Workspace OAuth
 |-------|--------|
 | API | FastAPI (Python 3.11+) |
 | Database | Postgres + pgvector |
-| LLM | Claude (Anthropic SDK) |
-| Meeting source | Google Meet REST API |
-| PM integrations | Jira REST, Linear GraphQL |
-| Auth | Google Workspace OAuth |
+| LLM | OpenAI |
+| Transcript source | File upload (.txt, .vtt, .srt) |
+| PM integrations | Linear GraphQL |
+| Queue | Redis + arq |
 | Infrastructure | docker-compose |
 
 ## Project Structure
@@ -56,8 +60,8 @@ PM agent/
 │   ├── app/
 │   │   ├── api/            # FastAPI routers (runs, proposals)
 │   │   ├── core/           # Orchestrator, proposal engine, citations validator
-│   │   ├── ingest/         # Meet API client, segment storage
-│   │   ├── integrations/   # jira.py, linear.py
+│   │   ├── ingest/         # Transcript parser, segment storage
+│   │   ├── integrations/   # linear.py (Linear GraphQL client)
 │   │   ├── rag/            # Feedback embeddings, pgvector retrieval
 │   │   ├── models/         # SQLAlchemy models
 │   │   └── config.py
@@ -76,7 +80,7 @@ PM agent/
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/your-org/pm-agent.git
+git clone https://github.com/Qurse123/PM-agent.git
 cd pm-agent
 cp backend/.env.example backend/.env   # fill in API keys
 
