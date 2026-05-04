@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.integrations.linear import LinearClient
-from app.models.db import FeedbackEvent, Proposal, ProposalCitation, Run, get_db
+from app.models.db import FeedbackEvent, Proposal, Run, get_db
 from app.rag.embed import embed_text
 
 router = APIRouter(prefix="/runs", tags=["proposals"])

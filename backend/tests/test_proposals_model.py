@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import (
     Column,
-    DateTime,
     ForeignKey,
     MetaData, 
     String,
@@ -25,7 +24,7 @@ from sqlalchemy import (
     Text,
     select,
 )
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 # ---------------------------------------------------------------------------
 # Shared in-memory SQLite engine + metadata (SQLite-compatible column types)

@@ -10,10 +10,8 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.ingest.parser import parse_transcript
 
@@ -399,13 +397,11 @@ async def test_duplicate_segment_id_raises_integrity_error():
     Inserting two TranscriptSegments with the same (run_id, segment_id)
     must raise IntegrityError — enforcing the citation grounding contract.
     """
-    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
     # We need to re-map Postgres-specific UUID columns to generic types for SQLite.
     # Build a fresh metadata that uses String for UUID columns.
     from sqlalchemy import (
         Column,
-        DateTime,
         ForeignKey,
         Integer,
         MetaData,
@@ -414,7 +410,6 @@ async def test_duplicate_segment_id_raises_integrity_error():
         Text,
         UniqueConstraint,
     )
-    from sqlalchemy.ext.asyncio import create_async_engine
 
     metadata = MetaData()
 
@@ -446,7 +441,6 @@ async def test_duplicate_segment_id_raises_integrity_error():
         await conn.run_sync(metadata.create_all)
 
     run_id = str(uuid.uuid4())
-    seg_id = str(uuid.uuid4())
 
     async with engine.connect() as conn:
         # Insert Run
