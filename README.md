@@ -1,15 +1,17 @@
 # PM Agent
 
-An AI-powered meeting agent that keeps Jira and Linear tickets up to date using Google Meet transcripts. Every proposed ticket change is **citation-grounded** — the model cites the exact transcript segments that justify each edit. Your team reviews a diff before anything is written. 
+An agentic AI system that turns meeting transcripts into Linear ticket updates — automatically. Upload a transcript and an LLM agent searches your Linear board, reasons over the discussion, and proposes field changes, status moves, and new issues. Every proposal is **citation-grounded**: the agent must cite the exact transcript segments that justify each edit, enforced in code.
+
+Before drafting proposals, the agent runs a **RAG retrieval step** — querying a pgvector database of past denial feedback so it learns from mistakes across runs. Your team reviews everything in a kanban diff UI before anything is written.
 
 ## How It Works
 
-1. **Ingest** — connect a Google Meet `conference_record_id`; the agent fetches the transcript via the Meet REST API and stores immutable segments (text, speaker, timestamps)
-2. **Identify** — the orchestrator searches Jira and Linear to find tickets related to the discussion
-3. **Propose** — the LLM drafts ticket changes; every change must cite real transcript segments (validated in code)
-4. **Review** — your team sees a diff UI with a citations panel; clicking a citation jumps to the transcript moment that justified the change
-5. **Apply or deny** — approve to write to Jira/Linear; deny with a reason and mark which citations were wrong
-6. **Learn** — denials are embedded and retrieved on future runs so the model doesn't repeat the same mistakes
+1. **Upload** — drop a `.txt`, `.vtt`, or `.srt` transcript file; supports batch upload (one run per file)
+2. **RAG retrieval** — the agent queries a pgvector vector database for similar past feedback before drafting anything
+3. **Agent loop** — the LLM searches Linear, reads relevant tickets, and proposes changes grounded in transcript citations
+4. **Review** — a 3-column kanban (Processing → To Review → Reviewed) shows each run; proposals display a field diff alongside the transcript excerpts that back them up
+5. **Approve or deny** — approvals write to Linear; denials capture which citations were wrong and embed the feedback into the vector DB
+6. **Learn** — denial embeddings are retrieved on future runs so the agent improves without retraining
 
 ## Architecture
 
