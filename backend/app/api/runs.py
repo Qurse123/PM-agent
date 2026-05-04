@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ingest.meet import fetch_conference_display_name, fetch_transcript_entries
 from app.ingest.parser import parse_transcript
-from app.models.db import Proposal, Run, TranscriptSegment, get_db
+from app.models.db import LinearTeam, Proposal, Run, TranscriptSegment, get_db
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -23,11 +23,13 @@ class PasteRunRequest(BaseModel):
     transcript_text: str
     conference_record_id: str | None = None  # auto-generated as f"paste-{run_id}" if omitted
     title: str | None = None  # optional meeting title; auto-extracted from transcript if omitted
+    linear_team_id: str | None = None  # explicit override; auto-matched from title if omitted
 
 
 class MeetRunRequest(BaseModel):
     conference_record_id: str
     title: str | None = None
+    linear_team_id: str | None = None
 
 
 class SegmentResponse(BaseModel):
@@ -49,6 +51,7 @@ class RunResponse(BaseModel):
     segment_count: int
     proposal_count: int = 0
     pending_proposal_count: int = 0
+    linear_team_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -89,6 +92,23 @@ def _extract_title(text: str) -> str | None:
             if len(prefix.split()) <= 3:
                 return None  # transcript starts immediately with dialogue — no title
         return line
+    return None
+
+
+async def _get_teams_as_dicts(db: AsyncSession) -> list[dict]:
+    result = await db.execute(select(LinearTeam))
+    return [
+        {"linear_team_id": t.linear_team_id, "name": t.name, "key": t.key}
+        for t in result.scalars().all()
+    ]
+
+
+def _match_team_by_title(title: str, teams: list[dict]) -> str | None:
+    """Return linear_team_id of the first team whose name or key appears in the title (case-insensitive)."""
+    lowered = title.lower()
+    for team in teams:
+        if team["name"].lower() in lowered or team["key"].lower() in lowered:
+            return team["linear_team_id"]
     return None
 
 
@@ -176,6 +196,7 @@ async def list_runs(
                 segment_count=seg_count,
                 proposal_count=proposal_count,
                 pending_proposal_count=pending_count,
+                linear_team_id=run.linear_team_id,
             )
         )
     return responses
@@ -189,11 +210,18 @@ async def create_run_from_paste(
     """Ingest a pasted transcript."""
     run_id = uuid.uuid4()
     title = request.title or _extract_title(request.transcript_text)
+
+    team_id = request.linear_team_id
+    if team_id is None and title:
+        teams = await _get_teams_as_dicts(db)
+        team_id = _match_team_by_title(title, teams)
+
     run = Run(
         id=run_id,
         conference_record_id=request.conference_record_id or f"paste-{run_id}",
         title=title,
         status="ingesting",
+        linear_team_id=team_id,
     )
     db.add(run)
     await db.flush()
@@ -217,6 +245,7 @@ async def create_run_from_paste(
         segment_count=len(segments),
         proposal_count=0,
         pending_proposal_count=0,
+        linear_team_id=run.linear_team_id,
     )
 
 
@@ -243,6 +272,7 @@ async def get_run(
         segment_count=seg_count,
         proposal_count=proposal_count,
         pending_proposal_count=pending_count,
+        linear_team_id=run.linear_team_id,
     )
 
 

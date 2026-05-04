@@ -157,10 +157,10 @@ alembic upgrade head
 uvicorn app.main:app --reload
 
 # 7. Start the background worker (separate terminal, venv active)
-python run_worker.py
+cd backend && python run_worker.py
 
-# 8. Start the frontend (separate terminal)
-cd ../frontend && npm install && npm run dev
+# 8. Start the frontend (separate terminal, from project root)
+cd frontend && npm install && npm run dev
 ```
 
 The review UI is at `http://localhost:5173` and the API at `http://localhost:8000`.

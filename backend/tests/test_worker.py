@@ -53,7 +53,7 @@ async def test_worker_calls_orchestrator_and_sets_ready():
     ):
         await orchestrate_run({}, str(run.id))
 
-    mock_orch.assert_called_once_with(run.id, session)
+    mock_orch.assert_called_once_with(run.id, session, team_id=run.linear_team_id)
     assert run.status == "ready"
     session.commit.assert_called_once()
 

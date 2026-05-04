@@ -22,6 +22,7 @@ class LinearClient:
         query: str,
         first: int = 20,
         after: str | None = None,
+        team_id: str | None = None,
     ) -> dict:
         """Search Linear issues by keyword or identifier. Returns {"issues": [...], "pageInfo": {...}}."""
         identifier_match = re.fullmatch(r"[A-Z]+-(\d+)", query.strip())
@@ -36,6 +37,9 @@ class LinearClient:
             }
         else:
             filter_ = {"searchableContent": {"contains": query}}
+
+        if team_id is not None:
+            filter_["team"] = {"id": {"eq": team_id}}
 
         variables: dict = {"filter": filter_, "first": first}
         if after is not None:
@@ -69,6 +73,18 @@ class LinearClient:
         if not result.get("issueCreate", {}).get("success"):
             raise RuntimeError(f"Linear issueCreate failed: {result}")
         return result["issueCreate"]["issue"]
+
+    async def list_teams(self) -> list[dict]:
+        """Fetch all Linear teams in the workspace. Returns list of {id, name, key, description}."""
+        gql = """
+        query {
+            teams {
+                nodes { id name key description }
+            }
+        }
+        """
+        data = await self._execute(gql, {})
+        return data["teams"]["nodes"]
 
     async def update_issue(self, issue_id: str, fields: dict) -> dict:
         """Update an existing Linear issue. `fields` is a partial IssueUpdateInput dict."""

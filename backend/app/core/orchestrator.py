@@ -119,6 +119,7 @@ async def _dispatch_tool(
     run_id: uuid.UUID,
     valid_segment_ids: set[str],
     proposal_ids: list[uuid.UUID],
+    team_id: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a tool call and return a result dict. Errors are returned as dicts (not raised)."""
     try:
@@ -127,6 +128,7 @@ async def _dispatch_tool(
                 query=input_["query"],
                 first=input_.get("first", 20),
                 after=input_.get("after"),
+                team_id=team_id,
             )
         elif name == "get_linear_issue":
             return await linear.get_issue(input_["issue_id"])
@@ -140,11 +142,13 @@ async def _dispatch_tool(
         return {"error": str(exc)}
 
 
-async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUID]:
+async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession, team_id: str | None = None) -> list[uuid.UUID]:
     """
     Run the LLM agent loop for a given run.
     Returns list of proposal IDs created.
     """
+    resolved_team_id = team_id
+
     result = await db.execute(
         select(TranscriptSegment)
         .where(TranscriptSegment.run_id == run_id)
@@ -254,6 +258,7 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUI
                 run_id=run_id,
                 valid_segment_ids=valid_segment_ids,
                 proposal_ids=proposal_ids,
+                team_id=resolved_team_id,
             )
             messages.append(
                 cast(
