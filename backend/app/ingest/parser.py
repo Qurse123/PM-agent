@@ -37,7 +37,7 @@ def parse_transcript(text: str, run_id: uuid.UUID) -> list[dict[str, Any]]:
         )
         idx += 1
 
-    lines = [l.strip() for l in text.strip().splitlines()]
+    lines = [line.strip() for line in text.strip().splitlines()]
 
     # Detect format: "Speaker: text" (inline) vs blank-line-separated blocks
     inline = any(": " in line for line in lines if line)
@@ -57,7 +57,7 @@ def parse_transcript(text: str, run_id: uuid.UUID) -> list[dict[str, Any]]:
         # Block format: blank lines separate speaker/text pairs
         raw_blocks = [b.strip() for b in text.strip().split("\n\n") if b.strip()]
         for block in raw_blocks:
-            blines = [l.strip() for l in block.splitlines() if l.strip()]
+            blines = [ln.strip() for ln in block.splitlines() if ln.strip()]
             if len(blines) < 2:
                 continue
             _add(blines[0], " ".join(blines[1:]))
