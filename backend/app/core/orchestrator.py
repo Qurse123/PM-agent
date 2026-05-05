@@ -51,6 +51,7 @@ async def _handle_create_proposal(
     run_id: uuid.UUID,
     valid_segment_ids: set[str],
     proposal_ids: list[uuid.UUID],
+    team_id: str | None = None,
 ) -> dict[str, Any]:
     """Validate citations and write proposal + citations to DB."""
     citations = input_.get("citations")
@@ -83,8 +84,18 @@ async def _handle_create_proposal(
             "Example for a create: {\"after\": {\"title\": \"Issue title\", \"description\": \"Details\", \"teamId\": \"<team_id_from_search_results>\"}}. "
             "Do NOT call create_proposal again without 'after'."
         )
+    if not isinstance(after, dict):
+        raise ValueError("'after' is required and must be a non-null object")
     if operation == "update" and before is None:
         raise ValueError("'before' must be provided for update operations")
+    after = dict(after)
+    if operation == "create":
+        if team_id:
+            after["teamId"] = team_id
+        elif not _is_uuid(after.get("teamId")):
+            raise ValueError(
+                "Create proposals require a valid Linear team. Select a Linear team for the run before analyzing."
+            )
 
     proposal = Proposal(
         run_id=run_id,
@@ -133,7 +144,14 @@ async def _dispatch_tool(
         elif name == "get_linear_issue":
             return await linear.get_issue(input_["issue_id"])
         elif name == "create_proposal":
-            return await _handle_create_proposal(input_, db, run_id, valid_segment_ids, proposal_ids)
+            return await _handle_create_proposal(
+                input_,
+                db,
+                run_id,
+                valid_segment_ids,
+                proposal_ids,
+                team_id=team_id,
+            )
         else:
             return {"error": f"Unknown tool: {name}"}
     except Exception as exc:
@@ -209,9 +227,14 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession, team_id: str | N
 
         logging.basicConfig(level=logging.INFO)
         _log = logging.getLogger(__name__)
+        tool_names = [
+            cast(ChatCompletionMessageFunctionToolCall, tc).function.name
+            for tc in (msg.tool_calls or [])
+            if getattr(tc, "type", None) == "function"
+        ]
         _log.info("ITER %d finish_reason=%s tool_calls=%s content=%s",
                   _iteration, choice.finish_reason,
-                  [tc.function.name for tc in (msg.tool_calls or [])],
+                  tool_names,
                   (msg.content or "")[:200])
 
         # Append assistant message (only function tool calls are supported here)
@@ -272,3 +295,13 @@ async def run_orchestrator(run_id: uuid.UUID, db: AsyncSession, team_id: str | N
             )
 
     return proposal_ids
+
+
+def _is_uuid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True

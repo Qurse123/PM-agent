@@ -244,6 +244,27 @@ async def test_update_issue_sends_correct_variables():
 
 
 @pytest.mark.asyncio
+async def test_resolve_update_input_resolves_non_uuid_assignee_id_as_name():
+    """LLM may put a person's name in assigneeId; resolve it before update."""
+    client = LinearClient(api_key="test-key")
+    client._search_users = AsyncMock(return_value=[{"id": "11111111-1111-1111-1111-111111111111", "displayName": "James Liu"}])  # type: ignore[method-assign]
+
+    result = await client.resolve_update_input(
+        "issue-123",
+        {
+            "description": "Updated",
+            "assigneeId": "James",
+        },
+    )
+
+    assert result == {
+        "description": "Updated",
+        "assigneeId": "11111111-1111-1111-1111-111111111111",
+    }
+    client._search_users.assert_awaited_once_with("James")
+
+
+@pytest.mark.asyncio
 async def test_create_issue_failure_raises():
     """create_issue raises RuntimeError when Linear returns success=False."""
     mock_resp = _mock_response(

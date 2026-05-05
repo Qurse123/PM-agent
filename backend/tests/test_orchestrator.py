@@ -23,7 +23,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.core.orchestrator import MAX_ITERATIONS, run_orchestrator
+from app.core.orchestrator import MAX_ITERATIONS, _handle_create_proposal, run_orchestrator
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +159,82 @@ def _make_segment(segment_id: str, run_id: uuid.UUID) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
+# Proposal creation validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_overrides_create_team_id_from_run():
+    """Create proposals use the server-selected Linear team, not model placeholders."""
+    run_id = uuid.uuid4()
+    valid_seg_id = f"paste-{run_id}-0000"
+    real_team_id = str(uuid.uuid4())
+    db = AsyncMock(spec=AsyncSession)
+    proposal_ids: list[uuid.UUID] = []
+
+    await _handle_create_proposal(
+        {
+            "target": "linear",
+            "operation": "create",
+            "before": None,
+            "after": {
+                "title": "Rotate credentials",
+                "description": "Rotate overdue credentials.",
+                "teamId": "team-id",
+            },
+            "citations": [
+                {
+                    "segment_ids": [valid_seg_id],
+                    "quote": "Rotate the credentials.",
+                    "rationale": "The transcript explicitly asks for rotation.",
+                }
+            ],
+        },
+        db,
+        run_id,
+        {valid_seg_id},
+        proposal_ids,
+        team_id=real_team_id,
+    )
+
+    proposal = db.add.call_args_list[0].args[0]
+    assert proposal.after["teamId"] == real_team_id
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_rejects_placeholder_team_id_without_run_team():
+    """A create proposal cannot store a fake Linear team ID."""
+    run_id = uuid.uuid4()
+    valid_seg_id = f"paste-{run_id}-0000"
+    db = AsyncMock(spec=AsyncSession)
+
+    with pytest.raises(ValueError, match="valid Linear team"):
+        await _handle_create_proposal(
+            {
+                "target": "linear",
+                "operation": "create",
+                "before": None,
+                "after": {
+                    "title": "Rotate credentials",
+                    "description": "Rotate overdue credentials.",
+                    "teamId": "team-id",
+                },
+                "citations": [
+                    {
+                        "segment_ids": [valid_seg_id],
+                        "quote": "Rotate the credentials.",
+                        "rationale": "The transcript explicitly asks for rotation.",
+                    }
+                ],
+            },
+            db,
+            run_id,
+            {valid_seg_id},
+            [],
+        )
+
+
+# ---------------------------------------------------------------------------
 # 1. Empty transcript raises (no Claude call)
 # ---------------------------------------------------------------------------
 
@@ -238,7 +314,7 @@ async def test_happy_path_creates_proposal():
     # directly to bypass ORM/DB entirely and just verify the proposal_ids list is populated.
     captured_proposals: list[dict] = []
 
-    async def _fake_handle_create_proposal(input_, db, r_id, valid_ids, proposal_ids):
+    async def _fake_handle_create_proposal(input_, db, r_id, valid_ids, proposal_ids, **kwargs):
         # Validate citations as the real implementation does
         citations = input_.get("citations", [])
         if not citations:
