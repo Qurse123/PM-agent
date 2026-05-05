@@ -43,6 +43,7 @@ def _make_run(status: str = "ready") -> MagicMock:
     run.conference_record_id = "conf-test"
     run.status = status
     run.created_at = datetime.now(timezone.utc)
+    run.linear_team_id = str(uuid.uuid4())
     return run
 
 
@@ -59,7 +60,7 @@ def _make_proposal(
     proposal.target = "linear"
     proposal.operation = operation
     proposal.before = before
-    proposal.after = after or {"title": "New ticket", "description": "Details", "teamId": "team-abc"}
+    proposal.after = after or {"title": "New ticket", "description": "Details", "teamId": str(uuid.uuid4())}
     proposal.status = status
     proposal.created_at = datetime.now(timezone.utc)
     proposal.citations = []
@@ -310,10 +311,11 @@ async def test_approve_proposal_not_pending():
 @pytest.mark.asyncio
 async def test_approve_create_calls_linear_and_sets_applied():
     run = _make_run()
+    team_id = str(uuid.uuid4())
     proposal = _make_proposal(
         run.id,
         operation="create",
-        after={"title": "New ticket", "description": "Details", "teamId": "team-abc"},
+        after={"title": "New ticket", "description": "Details", "teamId": team_id},
     )
     db = _make_db([_scalar_result(proposal)])
     db.refresh = AsyncMock()
@@ -334,8 +336,44 @@ async def test_approve_create_calls_linear_and_sets_applied():
             mock_linear.create_issue.assert_called_once_with(
                 title="New ticket",
                 description="Details",
-                team_id="team-abc",
+                team_id=team_id,
             )
+            assert proposal.status == "applied"
+        finally:
+            app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_approve_create_uses_run_team_when_proposal_has_placeholder():
+    run = _make_run()
+    run.linear_team_id = str(uuid.uuid4())
+    proposal = _make_proposal(
+        run.id,
+        operation="create",
+        after={"title": "New ticket", "description": "Details", "teamId": "team-id"},
+    )
+    db = _make_db([_scalar_result(proposal), _scalar_result(run)])
+    db.refresh = AsyncMock()
+
+    async def _override():
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    app.state.arq_pool = _mock_arq_pool()
+    mock_linear = AsyncMock()
+    mock_linear.create_issue = AsyncMock(return_value={"id": "li-1", "title": "New ticket", "url": "https://linear.app/li-1"})
+
+    with patch("app.api.proposals.LinearClient", return_value=mock_linear):
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post(f"/runs/{run.id}/proposals/{proposal.id}/approve")
+            assert resp.status_code == 200
+            mock_linear.create_issue.assert_called_once_with(
+                title="New ticket",
+                description="Details",
+                team_id=run.linear_team_id,
+            )
+            assert proposal.after["teamId"] == run.linear_team_id
             assert proposal.status == "applied"
         finally:
             app.dependency_overrides.clear()
@@ -364,6 +402,7 @@ async def test_approve_update_calls_linear_and_sets_applied():
     app.dependency_overrides[get_db] = _override
     app.state.arq_pool = _mock_arq_pool()
     mock_linear = AsyncMock()
+    mock_linear.resolve_update_input = AsyncMock(return_value={"title": "Updated title"})
     mock_linear.update_issue = AsyncMock(return_value={"id": "li-existing-123", "title": "Updated title", "url": "https://linear.app/li-existing-123"})
 
     with patch("app.api.proposals.LinearClient", return_value=mock_linear):
@@ -391,7 +430,7 @@ async def test_approve_linear_failure_sets_failed():
     proposal = _make_proposal(
         run.id,
         operation="create",
-        after={"title": "New ticket", "description": "", "teamId": "team-abc"},
+        after={"title": "New ticket", "description": "", "teamId": str(uuid.uuid4())},
     )
     db = _make_db([_scalar_result(proposal)])
 

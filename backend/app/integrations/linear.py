@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 from pathlib import Path
 
 import httpx
@@ -86,8 +87,73 @@ class LinearClient:
         data = await self._execute(gql, {})
         return data["teams"]["nodes"]
 
+    async def resolve_update_input(self, issue_id: str, raw: dict) -> dict:
+        """Translate a proposal's after dict into a valid IssueUpdateInput for Linear.
+
+        The LLM stores human-readable values (e.g. state="In Progress", assignee="James Liu").
+        Linear's API requires IDs (stateId, assigneeId). This method resolves them.
+        """
+        _PASSTHROUGH = {"title", "description", "priority", "stateId", "assigneeId",
+                        "teamId", "labelIds", "dueDate", "estimate", "parentId"}
+        out: dict = {k: v for k, v in raw.items() if k in _PASSTHROUGH}
+
+        if "stateId" in out and not _is_uuid(out["stateId"]):
+            out.pop("stateId")
+        if "assigneeId" in out and not _is_uuid(out["assigneeId"]):
+            out.pop("assigneeId")
+
+        needs_state = "state" in raw or ("stateId" in raw and "stateId" not in out)
+        needs_assignee = "assignee" in raw or ("assigneeId" in raw and "assigneeId" not in out)
+
+        issue: dict | None = None
+        if needs_state:
+            issue = await self.get_issue(issue_id)
+
+        if needs_state:
+            state_val = raw.get("state", raw.get("stateId"))
+            state_name = state_val if isinstance(state_val, str) else (state_val.get("name") if isinstance(state_val, dict) else None)
+            if state_name and issue:
+                states = await self._get_workflow_states(issue["team"]["id"])
+                match = next((s for s in states if s["name"].lower() == state_name.lower()), None)
+                if match:
+                    out["stateId"] = match["id"]
+
+        if needs_assignee:
+            assignee_val = raw.get("assignee", raw.get("assigneeId"))
+            assignee_name = assignee_val if isinstance(assignee_val, str) else (assignee_val.get("name") if isinstance(assignee_val, dict) else None)
+            if assignee_name:
+                users = await self._search_users(assignee_name)
+                if users:
+                    out["assigneeId"] = users[0]["id"]
+
+        return out
+
+    async def _get_workflow_states(self, team_id: str) -> list[dict]:
+        gql = """
+        query TeamStates($id: String!) {
+            team(id: $id) {
+                states {
+                    nodes { id name }
+                }
+            }
+        }
+        """
+        data = await self._execute(gql, {"id": team_id})
+        return data["team"]["states"]["nodes"]
+
+    async def _search_users(self, name: str) -> list[dict]:
+        gql = """
+        query Users($name: String!) {
+            users(filter: { displayName: { containsIgnoreCase: $name } }) {
+                nodes { id displayName }
+            }
+        }
+        """
+        data = await self._execute(gql, {"name": name})
+        return data["users"]["nodes"]
+
     async def update_issue(self, issue_id: str, fields: dict) -> dict:
-        """Update an existing Linear issue. `fields` is a partial IssueUpdateInput dict."""
+        """Update an existing Linear issue. `fields` is a valid IssueUpdateInput dict."""
         mutation = """
         mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
             issueUpdate(id: $id, input: $input) {
@@ -127,3 +193,13 @@ class LinearClient:
         if last_response is not None:
             last_response.raise_for_status()  # final raise after exhausted retries
         raise RuntimeError("Linear request failed before receiving a response")
+
+
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True

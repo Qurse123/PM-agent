@@ -50,6 +50,31 @@ class DenyRequest(BaseModel):
     disputed_segment_ids: list[str] = []
 
 
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_create_team_id(after: dict, run_team_id: str | None) -> str:
+    team_id = after.get("teamId")
+    if _is_uuid(team_id):
+        assert isinstance(team_id, str)
+        return team_id
+    if _is_uuid(run_team_id):
+        assert run_team_id is not None
+        after["teamId"] = run_team_id
+        return run_team_id
+    raise HTTPException(
+        status_code=400,
+        detail="Create proposals require a valid Linear team. Select a Linear team for the run and analyze again.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /runs/{run_id}/proposals
 # ---------------------------------------------------------------------------
@@ -135,11 +160,17 @@ async def approve_proposal(
     linear = LinearClient(settings.linear_api_key)
     try:
         if proposal.operation == "create":
-            after = proposal.after
+            after = dict(proposal.after)
+            run = None
+            if not _is_uuid(after.get("teamId")):
+                run_result = await db.execute(select(Run).where(Run.id == run_id))
+                run = run_result.scalar_one_or_none()
+            team_id = _resolve_create_team_id(after, run.linear_team_id if run else None)
+            proposal.after = after
             await linear.create_issue(
                 title=after["title"],
                 description=after.get("description", ""),
-                team_id=after["teamId"],
+                team_id=team_id,
             )
         elif proposal.operation == "update":
             if proposal.before is None or "id" not in proposal.before:
@@ -148,7 +179,8 @@ async def approve_proposal(
                     detail="Update proposals must include before.id",
                 )
             issue_id = proposal.before["id"]
-            await linear.update_issue(issue_id, proposal.after)
+            cleaned = await linear.resolve_update_input(issue_id, proposal.after)
+            await linear.update_issue(issue_id, cleaned)
         proposal.status = "applied"
     except Exception:
         proposal.status = "failed"
@@ -211,7 +243,8 @@ async def approve_all_proposals(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     result = await db.execute(select(Run).where(Run.id == run_id))
-    if result.scalar_one_or_none() is None:
+    run = result.scalar_one_or_none()
+    if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
     pending_result = await db.execute(
@@ -232,16 +265,20 @@ async def approve_all_proposals(
         await db.flush()
         try:
             if proposal.operation == "create":
-                after = proposal.after
+                after = dict(proposal.after)
+                team_id = _resolve_create_team_id(after, run.linear_team_id)
+                proposal.after = after
                 await linear.create_issue(
                     title=after["title"],
                     description=after.get("description", ""),
-                    team_id=after["teamId"],
+                    team_id=team_id,
                 )
             elif proposal.operation == "update":
                 if proposal.before is None or "id" not in proposal.before:
                     raise ValueError("Update proposals must include before.id")
-                await linear.update_issue(proposal.before["id"], proposal.after)
+                _issue_id = proposal.before["id"]
+                _cleaned = await linear.resolve_update_input(_issue_id, proposal.after)
+                await linear.update_issue(_issue_id, _cleaned)
             proposal.status = "applied"
             approved += 1
             results.append({"id": str(proposal.id), "status": "applied"})
