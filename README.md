@@ -4,6 +4,8 @@ An agentic AI system that turns meeting transcripts into Linear ticket updates �
 
 Before drafting proposals, the agent runs a **RAG retrieval step** — querying a pgvector database of past denial feedback so it learns from mistakes across runs. Your team reviews everything in a kanban diff UI before anything is written.
 
+![PM Agent demo](docs/demo.gif)
+
 ## How It Works
 
 1. **Upload** — drop a `.txt`, `.vtt`, or `.srt` transcript file; supports batch upload (one run per file)
